@@ -7,6 +7,7 @@
   * Modify the implementation of `Control.Exception.throw` to avoid call-sites being inferred as diverging via precise exception.
     ([GHC #25066](https://gitlab.haskell.org/ghc/ghc/-/issues/25066), [CLC proposal #290](https://github.com/haskell/core-libraries-committee/issues/290))
   * `Data.List.NonEmpty.{init,last,tails1}` are now defined using only total functions (rather than partial ones). ([CLC proposal #293](https://github.com/haskell/core-libraries-committee/issues/293))
+  * The `Data.Enum.enumerate` function was introduced ([CLC #306](https://github.com/haskell/core-libraries-committee/issues/306))
 
 ## 4.21.0.0 *TBA*
   * Introduce `Data.Bounded` module exporting the `Bounded` typeclass (finishing [CLC proposal #208](https://github.com/haskell/core-libraries-committee/issues/208))
