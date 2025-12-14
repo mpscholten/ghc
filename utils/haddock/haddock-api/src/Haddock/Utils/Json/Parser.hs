@@ -10,6 +10,8 @@ import qualified Data.ByteString.Lazy.Char8 as BSCL
 import Data.Char (isHexDigit)
 import Data.Functor (($>))
 import qualified Data.List as List
+import Data.Text (Text)
+import qualified Data.Text as T
 import Numeric
 import Text.Parsec.ByteString.Lazy (Parser)
 import Text.ParserCombinators.Parsec ((<?>))
@@ -60,12 +62,13 @@ parseArray =
     (tok (Parsec.char ']'))
     (parseValue `Parsec.sepBy` tok (Parsec.char ','))
 
-parseString :: Parser String
+parseString :: Parser Text
 parseString =
-  Parsec.between
-    (tok (Parsec.char '"'))
-    (tok (Parsec.char '"'))
-    (many char)
+  T.pack <$>
+    Parsec.between
+      (tok (Parsec.char '"'))
+      (tok (Parsec.char '"'))
+      (many char)
   where
     char =
       (Parsec.char '\\' >> escapedChar)
@@ -115,7 +118,7 @@ parseObject =
     (tok (Parsec.char '}'))
     (field `Parsec.sepBy` tok (Parsec.char ','))
   where
-    field :: Parser (String, Value)
+    field :: Parser (Text, Value)
     field =
       (,)
         <$> parseString
