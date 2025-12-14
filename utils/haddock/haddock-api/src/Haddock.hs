@@ -331,7 +331,7 @@ renderStep dflags parserOpts logger unit_state flags sinceQual nameQual pkgs int
     extSrcMap = Map.fromList $ do
       (DocPaths {docPathsSources=Just path}, _, _, ifile) <- pkgs
       iface <- ifInstalledIfaces ifile
-      return (instMod iface, path)
+      return (instMod iface, unsafeDecodeUtf path)
   render dflags parserOpts logger unit_state flags sinceQual nameQual interfaces installedIfaces extSrcMap
   where
     -- get package name from unit-id
