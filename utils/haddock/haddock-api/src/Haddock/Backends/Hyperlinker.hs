@@ -12,6 +12,7 @@ import Control.Monad (unless)
 import Data.Map as M
 import Data.Maybe
 import GHC.Data.FastString (mkFastString)
+import GHC.Data.OsPath (OsPath, unsafeDecodeUtf, unsafeEncodeUtf, (</>), (<.>))
 import GHC.Driver.Config.Diagnostic (initDiagOpts)
 import qualified GHC.Driver.DynFlags as DynFlags
 import GHC.Driver.Session (safeImportsOn)
@@ -21,8 +22,8 @@ import GHC.Parser.Lexer as Lexer
 import GHC.Types.SrcLoc (mkRealSrcLoc, realSrcLocSpan, srcSpanFile)
 import GHC.Unit.Module (Module, moduleName)
 import qualified GHC.Utils.Outputable as Outputable
-import System.Directory
-import System.FilePath
+import System.Directory.OsPath
+import qualified System.OsPath as OsPath
 
 import Haddock.Backends.Hyperlinker.Parser
 import Haddock.Backends.Hyperlinker.Renderer
@@ -42,11 +43,11 @@ ppHyperlinkedSource
   :: Verbosity
   -> Bool
   -- ^ In one-shot mode
-  -> FilePath
+  -> OsPath
   -- ^ Output directory
-  -> FilePath
+  -> OsPath
   -- ^ Resource directory
-  -> Maybe FilePath
+  -> Maybe OsPath
   -- ^ Custom CSS file path
   -> Bool
   -- ^ Flag indicating whether to pretty-print HTML
@@ -59,18 +60,18 @@ ppHyperlinkedSource verbosity isOneShot outdir libdir mstyle pretty srcs' ifaces
   createDirectoryIfMissing True srcdir
   unless isOneShot $ do
     let cssFile = fromMaybe (defaultCssFile libdir) mstyle
-    copyFile cssFile $ srcdir </> srcCssFile
-    copyFile (libdir </> "html" </> highlightScript) $
-      srcdir </> highlightScript
+    copyFile cssFile $ srcdir </> unsafeEncodeUtf srcCssFile
+    copyFile (libdir </> unsafeEncodeUtf "html" </> unsafeEncodeUtf highlightScript) $
+      srcdir </> unsafeEncodeUtf highlightScript
   mapM_ (ppHyperlinkedModuleSource verbosity srcdir pretty srcs) ifaces
   where
-    srcdir = outdir </> hypSrcDir
+    srcdir = outdir </> unsafeEncodeUtf hypSrcDir
     srcs = (srcs', M.mapKeys moduleName srcs')
 
 -- | Generate hyperlinked source for particular interface.
 ppHyperlinkedModuleSource
   :: Verbosity
-  -> FilePath
+  -> OsPath
   -> Bool
   -> SrcMaps
   -> Interface
@@ -129,8 +130,8 @@ ppHyperlinkedModuleSource verbosity srcdir pretty srcs iface = do
         False -- lex Haddocks as comment tokens
         True -- produce comment tokens
         False -- produce position pragmas tokens
-    render' thisModule = render thisModule (Just srcCssFile) (Just highlightScript) srcs
-    path = srcdir </> hypSrcModuleFile (ifaceMod iface)
+    render' thisModule = render thisModule (Just (unsafeEncodeUtf srcCssFile)) (Just (unsafeEncodeUtf highlightScript)) srcs
+    path = srcdir </> unsafeEncodeUtf (hypSrcModuleFile (ifaceMod iface))
 
     emptyHieAst fileFs =
       Node
@@ -148,5 +149,6 @@ highlightScript :: FilePath
 highlightScript = "highlight.js"
 
 -- | Path to default CSS file.
-defaultCssFile :: FilePath -> FilePath
+defaultCssFile :: OsPath -> OsPath
+defaultCssFile libdir = libdir </> unsafeEncodeUtf "html" </> unsafeEncodeUtf "style.css"
 defaultCssFile libdir = libdir </> "html" </> "solarized.css"
