@@ -47,6 +47,7 @@ import GHC.Builtin.Names
 import GHC.Builtin.Types.Prim
 import GHC.Core.ConLike (ConLike (..))
 import GHC.Data.FastString (FastString, bytesFS, unpackFS)
+import GHC.Data.OsPath (OsPath)
 import qualified GHC.Driver.Config.Parser as Parser
 import qualified GHC.Driver.DynFlags as DynFlags
 import GHC.Driver.Ppr
@@ -103,7 +104,7 @@ createInterface1'
   => [Flag]
   -> UnitState
   -> DynFlags
-  -> FilePath
+  -> OsPath
   -> ModIface
   -> IfaceMap
   -> InstIfaceMap
