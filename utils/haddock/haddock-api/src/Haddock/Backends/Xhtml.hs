@@ -41,6 +41,7 @@ import qualified Data.Map.Strict as Map
 import Data.Maybe
 import Data.Ord (comparing)
 import qualified Data.Set as Set hiding (Set)
+import qualified Data.Text as T
 import GHC hiding (LexicalFixity (..), NoLink, moduleInfo)
 import GHC.Types.Name
 import GHC.Unit.State
@@ -582,10 +583,10 @@ instance ToJSON JsonIndexEntry where
       , jieLink
       } =
       Object
-        [ "display_html" .= String jieHtmlFragment
-        , "name" .= String jieName
-        , "module" .= String jieModule
-        , "link" .= String jieLink
+        [ "display_html" .= T.pack jieHtmlFragment
+        , "name" .= T.pack jieName
+        , "module" .= T.pack jieModule
+        , "link" .= T.pack jieLink
         ]
 
 instance FromJSON JsonIndexEntry where
