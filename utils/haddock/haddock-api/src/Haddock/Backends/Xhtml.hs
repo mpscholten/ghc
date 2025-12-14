@@ -64,7 +64,7 @@ import Haddock.InterfaceFile (PackageInfo (..), PackageInterfaces (..), ppPackag
 import Haddock.ModuleTree
 import Haddock.Options (Visibility (..))
 import Haddock.Types
-import Haddock.Utils
+import Haddock.Utils (mapConcurrently_)
 import Haddock.Utils.Json
 import Haddock.Version
 
@@ -188,7 +188,7 @@ ppHtml
         visible_ifaces
         []
 
-    mapM_
+    mapConcurrently_
       ( ppHtmlModule
           odir
           doctitle
