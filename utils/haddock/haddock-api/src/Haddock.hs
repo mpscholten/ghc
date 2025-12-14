@@ -41,19 +41,21 @@ import Data.Maybe
 import Data.IORef
 import Data.Map.Strict (Map)
 import Data.Version (makeVersion)
+import GHC.Data.OsPath (OsPath, unsafeDecodeUtf, unsafeEncodeUtf, (</>))
 import GHC.Parser.Lexer (ParserOpts)
 import qualified GHC.Driver.Config.Parser as Parser
 import qualified Data.Map.Strict as Map
 import System.IO
 import System.Exit
-import System.FilePath
 #ifdef IN_GHC_TREE
 import System.Environment (getExecutablePath)
 #else
 import qualified GHC.Paths as GhcPaths
 import Paths_haddock_api (getDataDir)
 #endif
-import System.Directory (doesDirectoryExist, getTemporaryDirectory)
+import System.Directory.OsPath (doesDirectoryExist)
+import System.Directory (getTemporaryDirectory)
+import qualified System.OsPath as OsPath
 import Text.ParserCombinators.ReadP (readP_to_S)
 import GHC hiding (verbosity)
 import GHC.Settings.Config
@@ -216,7 +218,7 @@ haddockWithGhc ghc args = handleTopExceptions $ do
     -- If any --show-interface was used, show the given interfaces
     forM_ (optShowInterfaceFile flags) $ \path -> liftIO $ do
       name_cache <- freshNameCache
-      mIfaceFile <- readInterfaceFiles name_cache [(DocPaths "" Nothing, Visible, path)] noChecks
+      mIfaceFile <- readInterfaceFiles name_cache [(DocPaths (unsafeEncodeUtf "") Nothing, Visible, path)] noChecks
       forM_ mIfaceFile $ \(_,_,_, ifaceFile) -> do
         putMsg logger $ renderJson (jsonInterfaceFile ifaceFile)
 
@@ -256,9 +258,9 @@ haddockWithGhc ghc args = handleTopExceptions $ do
 -- | Run the GHC action using a temporary output directory
 withTempOutputDir :: Ghc a -> Ghc a
 withTempOutputDir action = do
-  tmp <- liftIO getTemporaryDirectory
+  tmp <- liftIO (unsafeEncodeUtf <$> getTemporaryDirectory)
   x   <- liftIO getProcessID
-  let dir = tmp </> ".haddock-" ++ show x
+  let dir = tmp </> unsafeEncodeUtf (".haddock-" ++ show x)
   modifySessionDynFlags (setOutputDir dir)
   withTempDir dir action
 
@@ -287,7 +289,7 @@ withGhc flags action = do
 
 
 readPackagesAndProcessModules :: [Flag] -> [String]
-                              -> Ghc ([(DocPaths, Visibility, FilePath, InterfaceFile)], [Interface], LinkEnv)
+                              -> Ghc ([(DocPaths, Visibility, OsPath, InterfaceFile)], [Interface], LinkEnv)
 readPackagesAndProcessModules flags files = do
     -- Whether or not we bypass the interface file version check
     let noChecks = Flag_BypassInterfaceVersonCheck `elem` flags
@@ -311,20 +313,20 @@ renderStep
   -> [Flag]
   -> SinceQual
   -> QualOption
-  -> [(DocPaths, Visibility, FilePath, InterfaceFile)]
+  -> [(DocPaths, Visibility, OsPath, InterfaceFile)]
   -> [Interface]
   -> IO ()
 renderStep dflags parserOpts logger unit_state flags sinceQual nameQual pkgs interfaces = do
   updateHTMLXRefs (map (\(docPath, _ifaceFilePath, _showModules, ifaceFile) ->
                           ( case baseUrl flags of
-                              Nothing  -> docPathsHtml docPath
+                              Nothing  -> unsafeDecodeUtf (docPathsHtml docPath)
                               Just url -> url </> packageName (ifUnitId ifaceFile)
                           , ifaceFile)) pkgs)
   let
     installedIfaces =
       map
         (\(_, showModules, ifaceFilePath, ifaceFile)
-          -> (ifaceFilePath, mkPackageInterfaces showModules ifaceFile))
+          -> (unsafeDecodeUtf ifaceFilePath, mkPackageInterfaces showModules ifaceFile))
         pkgs
     extSrcMap = Map.fromList $ do
       (DocPaths {docPathsSources=Just path}, _, _, ifile) <- pkgs
@@ -350,7 +352,7 @@ render
   -> QualOption
   -> [Interface]
   -> [(FilePath, PackageInterfaces)]
-  -> Map Module FilePath
+  -> Map Module String
   -> IO ()
 render dflags parserOpts logger unit_state flags sinceQual qual ifaces packages extSrcMap = do
   let
@@ -565,9 +567,9 @@ render dflags parserOpts logger unit_state flags sinceQual qual ifaces packages 
 
 
 readInterfaceFiles :: NameCache
-                   -> [(DocPaths, Visibility, FilePath)]
+                   -> [(DocPaths, Visibility, OsPath)]
                    -> Bool
-                   -> IO [(DocPaths, Visibility, FilePath, InterfaceFile)]
+                   -> IO [(DocPaths, Visibility, OsPath, InterfaceFile)]
 readInterfaceFiles name_cache_accessor pairs bypass_version_check = do
   catMaybes `liftM` mapM ({-# SCC readInterfaceFile #-} tryReadIface) pairs
   where
@@ -575,7 +577,7 @@ readInterfaceFiles name_cache_accessor pairs bypass_version_check = do
     tryReadIface (paths, vis, file) =
       readInterfaceFile name_cache_accessor file bypass_version_check >>= \case
         Left err -> do
-          putStrLn ("Warning: Cannot read " ++ file ++ ":")
+          putStrLn ("Warning: Cannot read " ++ unsafeDecodeUtf file ++ ":")
           putStrLn ("   " ++ err)
           putStrLn "Skipping this interface."
           return Nothing
@@ -663,7 +665,7 @@ unsetPatternMatchWarnings dflags =
 -------------------------------------------------------------------------------
 
 
-getHaddockLibDir :: [Flag] -> IO FilePath
+getHaddockLibDir :: [Flag] -> IO OsPath
 getHaddockLibDir flags =
   case [str | Flag_Lib str <- flags] of
     [] -> do
@@ -679,7 +681,7 @@ getHaddockLibDir flags =
       -- When Haddock was installed by @cabal@, the resources (which are listed
       -- under @data-files@ in the Cabal file) will have been copied to a
       -- special directory.
-      data_dir <- getDataDir      -- Provided by Cabal
+      data_dir <- unsafeEncodeUtf <$> getDataDir      -- Provided by Cabal
       let res_dirs = [ data_dir ] ++
 
 #endif
@@ -687,8 +689,8 @@ getHaddockLibDir flags =
       -- When Haddock is built locally (eg. regular @cabal new-build@), the data
       -- directory does not exist and we are probably invoking from either
       -- @./haddock-api@ or @./@
-                     [ "resources"
-                     , "haddock-api/resources"
+                     [ unsafeEncodeUtf "resources"
+                     , unsafeEncodeUtf "haddock-api/resources"
                      ]
 
       res_dir <- check res_dirs
@@ -696,31 +698,31 @@ getHaddockLibDir flags =
         Just p -> return p
         _      -> die "Haddock's resource directory does not exist!\n"
 
-    fs -> return (last fs)
+    fs -> return (unsafeEncodeUtf (last fs))
   where
     -- Pick the first path that corresponds to a directory that exists
-    check :: [FilePath] -> IO (Maybe FilePath)
+    check :: [OsPath] -> IO (Maybe OsPath)
     check [] = pure Nothing
     check (path : other_paths) = do
       exists <- doesDirectoryExist path
       if exists then pure (Just path) else check other_paths
 
 -- | Find the @lib@ directory for GHC and the path to @ghc@
-getGhcDirs :: [Flag] -> IO (Maybe FilePath, Maybe FilePath)
+getGhcDirs :: [Flag] -> IO (Maybe FilePath, Maybe OsPath)
 getGhcDirs flags = do
 
 #ifdef IN_GHC_TREE
   base_dir <- getBaseDir
   let ghc_path = Nothing
 #else
-  let base_dir = Just GhcPaths.libdir
+  let base_dir = Just (unsafeEncodeUtf GhcPaths.libdir)
       ghc_path = Just GhcPaths.ghc
 #endif
 
   -- If the user explicitly specifies a lib dir, use that
   let ghc_dir = case [ dir | Flag_GhcLibDir dir <- flags ] of
                   [] -> base_dir
-                  xs -> Just (last xs)
+                  xs -> Just (unsafeEncodeUtf (last xs))
 
   pure (ghc_path, ghc_dir)
 
@@ -728,18 +730,18 @@ getGhcDirs flags = do
 #ifdef IN_GHC_TREE
 
 -- | See 'getBaseDir' in "SysTools.BaseDir"
-getBaseDir :: IO (Maybe FilePath)
+getBaseDir :: IO (Maybe OsPath)
 getBaseDir = do
 
   -- Getting executable path can fail. Turn that into 'Nothing'
-  exec_path_opt <- catch (Just <$> getExecutablePath)
+  exec_path_opt <- catch (Just . unsafeEncodeUtf <$> getExecutablePath)
                          (\(_ :: SomeException) -> pure Nothing)
 
   -- Check that the path we are about to return actually exists
   case exec_path_opt of
     Nothing -> pure Nothing
     Just exec_path -> do
-      let base_dir = takeDirectory (takeDirectory exec_path) </> "lib"
+      let base_dir = OsPath.takeDirectory (OsPath.takeDirectory exec_path) </> unsafeEncodeUtf "lib"
       exists <- doesDirectoryExist base_dir
       pure (if exists then Just base_dir else Nothing)
 
