@@ -150,4 +150,4 @@ highlightScript = "highlight.js"
 
 -- | Path to default CSS file.
 defaultCssFile :: OsPath -> OsPath
-defaultCssFile libdir = libdir </> unsafeEncodeUtf "html" </> unsafeEncodeUtf "style.css"
+defaultCssFile libdir = libdir </> unsafeEncodeUtf "html" </> unsafeEncodeUtf "solarized.css"

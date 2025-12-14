@@ -352,7 +352,7 @@ render
   -> QualOption
   -> [Interface]
   -> [(FilePath, PackageInterfaces)]
-  -> Map Module String
+  -> Map Module FilePath
   -> IO ()
 render dflags parserOpts logger unit_state flags sinceQual qual ifaces packages extSrcMap = do
   let
