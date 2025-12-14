@@ -45,6 +45,7 @@ import Data.Word
 import GHC hiding (NoLink)
 import GHC.Data.FastMutInt
 import GHC.Data.FastString
+import GHC.Data.OsPath (OsPath, unsafeDecodeUtf)
 import GHC.Iface.Binary (getWithUserData, putSymbolTable)
 import GHC.Iface.Type (IfaceType, putIfaceType)
 import GHC.Types.Name.Cache
@@ -150,7 +151,7 @@ binaryInterfaceVersionCompatibility = [binaryInterfaceVersion]
 initBinMemSize :: Int
 initBinMemSize = 1024 * 1024
 
-writeInterfaceFile :: FilePath -> InterfaceFile -> IO ()
+writeInterfaceFile :: OsPath -> InterfaceFile -> IO ()
 writeInterfaceFile filename iface = do
   bh0 <- openBinMem initBinMemSize
   put_ bh0 binaryInterfaceMagic
@@ -224,7 +225,7 @@ writeInterfaceFile filename iface = do
   putDictionary bh dict_next dict_map
 
   -- and send the result to the file
-  writeBinMem bh filename
+  writeBinMem bh (unsafeDecodeUtf filename)
   return ()
 
 freshNameCache :: IO NameCache
@@ -238,19 +239,19 @@ freshNameCache = newNameCache
 -- a new empty name cache is used.
 readInterfaceFile
   :: NameCache
-  -> FilePath
+  -> OsPath
   -> Bool
   -- ^ Disable version check. Can cause runtime crash.
   -> IO (Either String InterfaceFile)
 readInterfaceFile name_cache filename bypass_checks = do
-  bh <- readBinMem filename
+  bh <- readBinMem (unsafeDecodeUtf filename)
   magic <- get bh
   if magic /= binaryInterfaceMagic
-    then return . Left $ "Magic number mismatch: couldn't load interface file: " ++ filename
+    then return . Left $ "Magic number mismatch: couldn't load interface file: " ++ unsafeDecodeUtf filename
     else do
       version <- get bh
       if not bypass_checks && (version `notElem` binaryInterfaceVersionCompatibility)
-        then return . Left $ "Interface file is of wrong version: " ++ filename
+        then return . Left $ "Interface file is of wrong version: " ++ unsafeDecodeUtf filename
         else Right <$> getWithUserData name_cache bh
 
 -------------------------------------------------------------------------------
