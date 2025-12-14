@@ -1,8 +1,8 @@
 module Haddock.Backends.Xhtml.Meta where
 
 import Data.ByteString.Builder (hPutBuilder)
-import System.FilePath ((</>))
-import System.IO (IOMode (WriteMode), withFile)
+import GHC.Data.OsPath (OsPath, (</>), unsafeEncodeUtf)
+import qualified System.OsPath as OsPath
 
 import Haddock.Utils.Json
 import Haddock.Version
@@ -15,7 +15,7 @@ quickjumpVersion = 1
 -- | Writes a json encoded file containing additional
 -- information about the generated documentation. This
 -- is useful for external tools (e.g., Hackage).
-writeHaddockMeta :: FilePath -> Bool -> IO ()
+writeHaddockMeta :: OsPath -> Bool -> IO ()
 writeHaddockMeta odir withQuickjump = do
   let
     meta_json :: Value
@@ -27,5 +27,5 @@ writeHaddockMeta odir withQuickjump = do
             ]
         )
 
-  withFile (odir </> "meta.json") WriteMode $ \h ->
+  OsPath.withFile (odir </> unsafeEncodeUtf "meta.json") WriteMode $ \h ->
     hPutBuilder h (encodeToBuilder meta_json)
