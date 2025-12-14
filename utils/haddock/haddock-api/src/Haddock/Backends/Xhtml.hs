@@ -27,6 +27,7 @@ module Haddock.Backends.Xhtml
   , ppJsonIndex
   ) where
 
+import Control.Concurrent.Async (mapConcurrently_)
 import Control.DeepSeq (force)
 import Control.Monad (unless, when)
 import Data.Bifunctor (bimap)
@@ -188,7 +189,7 @@ ppHtml
         visible_ifaces
         []
 
-    mapM_
+    mapConcurrently_
       ( ppHtmlModule
           odir
           doctitle

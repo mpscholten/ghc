@@ -8,6 +8,7 @@ module Haddock.Backends.Hyperlinker
   , module Haddock.Backends.Hyperlinker.Utils
   ) where
 
+import Control.Concurrent.Async (mapConcurrently_)
 import Control.Monad (unless)
 import Data.Map as M
 import Data.Maybe
@@ -62,7 +63,7 @@ ppHyperlinkedSource verbosity isOneShot outdir libdir mstyle pretty srcs' ifaces
     copyFile cssFile $ srcdir </> srcCssFile
     copyFile (libdir </> "html" </> highlightScript) $
       srcdir </> highlightScript
-  mapM_ (ppHyperlinkedModuleSource verbosity srcdir pretty srcs) ifaces
+  mapConcurrently_ (ppHyperlinkedModuleSource verbosity srcdir pretty srcs) ifaces
   where
     srcdir = outdir </> hypSrcDir
     srcs = (srcs', M.mapKeys moduleName srcs')
