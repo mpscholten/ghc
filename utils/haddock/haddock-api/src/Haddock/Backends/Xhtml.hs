@@ -27,10 +27,7 @@ module Haddock.Backends.Xhtml
   , ppJsonIndex
   ) where
 
-import Control.Concurrent (forkIO)
-import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.DeepSeq (force)
-import Control.Exception (SomeException, catch, throwIO)
 import Control.Monad (unless, when)
 import Data.Bifunctor (bimap)
 import qualified Data.ByteString.Builder as Builder
@@ -67,40 +64,9 @@ import Haddock.InterfaceFile (PackageInfo (..), PackageInterfaces (..), ppPackag
 import Haddock.ModuleTree
 import Haddock.Options (Visibility (..))
 import Haddock.Types
-import Haddock.Utils
+import Haddock.Utils (mapConcurrently_)
 import Haddock.Utils.Json
 import Haddock.Version
-
---------------------------------------------------------------------------------
-
--- * Utilities
-
---------------------------------------------------------------------------------
-
--- | Execute an action for each element of a list concurrently.
--- If any action throws an exception, all other actions are allowed to complete,
--- then the first exception is re-thrown.
-mapConcurrently_ :: (a -> IO ()) -> [a] -> IO ()
-mapConcurrently_ _ [] = return ()
-mapConcurrently_ f xs = do
-  -- Create MVars to wait for completion and collect results
-  resultMVars <- mapM (const newEmptyMVar) xs
-  
-  -- Fork a thread for each element
-  mapM_ forkThread (zip xs resultMVars)
-  
-  -- Wait for all threads and collect any errors
-  results <- mapM takeMVar resultMVars
-  
-  -- Re-throw the first exception if any
-  case [err | Just err <- results] of
-    (err:_) -> throwIO err
-    [] -> return ()
-  where
-    forkThread (x, resultMVar) = forkIO $ do
-      result <- catch (f x >> return Nothing)
-                      (\(e :: SomeException) -> return (Just e))
-      putMVar resultMVar result
 
 --------------------------------------------------------------------------------
 
