@@ -567,10 +567,10 @@ mkNode pkg qual ss p (Node s leaf _pkg srcPkg short ts) =
 --------------------------------------------------------------------------------
 
 data JsonIndexEntry = JsonIndexEntry
-  { jieHtmlFragment :: String
-  , jieName :: String
-  , jieModule :: String
-  , jieLink :: String
+  { jieHtmlFragment :: Text
+  , jieName :: Text
+  , jieModule :: Text
+  , jieLink :: Text
   }
   deriving (Show)
 
@@ -583,10 +583,10 @@ instance ToJSON JsonIndexEntry where
       , jieLink
       } =
       Object
-        [ "display_html" .= T.pack jieHtmlFragment
-        , "name" .= T.pack jieName
-        , "module" .= T.pack jieModule
-        , "link" .= T.pack jieLink
+        [ "display_html" .= jieHtmlFragment
+        , "name" .= jieName
+        , "module" .= jieModule
+        , "link" .= jieLink
         ]
 
 instance FromJSON JsonIndexEntry where
@@ -655,10 +655,10 @@ ppJsonIndex odir maybe_source_url maybe_wiki_url unicode pkg qual_opt ifaces ins
       | Just item_html <- processExport True links_info unicode pkg qual item =
           Just
             JsonIndexEntry
-              { jieHtmlFragment = Text.unpack (Text.decodeUtf8Lenient (LBS.toStrict (Builder.toLazyByteString (showHtmlFragment item_html))))
-              , jieName = unwords (map getOccString names)
-              , jieModule = moduleString mdl
-              , jieLink = LText.unpack $ fromMaybe "" (listToMaybe (map (nameLink mdl) names))
+              { jieHtmlFragment = Text.decodeUtf8Lenient (LBS.toStrict (Builder.toLazyByteString (showHtmlFragment item_html)))
+              , jieName = Text.pack (unwords (map getOccString names))
+              , jieModule = Text.pack (moduleString mdl)
+              , jieLink = LText.toStrict $ fromMaybe "" (listToMaybe (map (nameLink mdl) names))
               }
       | otherwise = Nothing
       where
