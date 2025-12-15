@@ -709,9 +709,11 @@ The main advantages to using ``ghc --make`` over traditional
 -  GHC re-calculates the dependencies each time it is invoked, so the
    dependencies never get out of sync with the source.
 
--  Using the :ghc-flag:`-j[⟨n⟩]` flag, you can compile modules in parallel.
-   Specify ``-j ⟨n⟩`` to compile ⟨n⟩ jobs in parallel. If ⟨n⟩ is omitted, then
-   it defaults to the number of processors.
+-  By default, GHC compiles modules in parallel using all available processors.
+   Using the :ghc-flag:`-j[⟨n⟩]` flag, you can override this behavior.
+   Specify ``-j ⟨n⟩`` to compile ⟨n⟩ jobs in parallel, or ``-j1`` to disable
+   parallel compilation. If ⟨n⟩ is omitted, then it defaults to the number
+   of processors.
 
 Any of the command-line options described in the rest of this chapter
 can be used with ``--make``, but note that any options you give on the
@@ -743,10 +745,13 @@ search path (see :ref:`search-path`).
     :type: dynamic
     :category: misc
 
-    Perform compilation in parallel when possible. GHC will use up to ⟨N⟩
-    threads during compilation. If N is omitted, then it defaults to the
-    number of processors. Note that compilation of a module may not begin
-    until its dependencies have been built.
+    Override the default parallel compilation behavior. By default, GHC will
+    compile modules in parallel using all available processors. Specify
+    ``-j ⟨N⟩`` to use up to ⟨N⟩ threads during compilation instead. If N is
+    omitted, it defaults to the number of processors (same as the default
+    behavior). Use ``-j1`` to disable parallel compilation. Note that
+    compilation of a module may not begin until its dependencies have been
+    built.
 
 
 GHC Jobserver Protocol
