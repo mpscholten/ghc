@@ -31,7 +31,7 @@ import Haddock.Backends.Hyperlinker.Utils
 import Haddock.Backends.Xhtml.Utils (renderToBuilder)
 import Haddock.InterfaceFile
 import Haddock.Types
-import Haddock.Utils (Verbosity, out, verbose)
+import Haddock.Utils (Verbosity, out, verbose, mapConcurrently_)
 import qualified Data.ByteString.Builder as Builder
 
 -- | Generate hyperlinked source for given interfaces.
@@ -63,7 +63,7 @@ ppHyperlinkedSource verbosity isOneShot outdir libdir mstyle pretty srcs' ifaces
     copyFile cssFile $ srcdir </> srcCssFile
     copyFile (libdir </> "html" </> highlightScript) $
       srcdir </> highlightScript
-  mapM_ (ppHyperlinkedModuleSource verbosity srcdir pretty srcs) ifaces
+  mapConcurrently_ (ppHyperlinkedModuleSource verbosity srcdir pretty srcs) ifaces
   where
     srcdir = outdir </> hypSrcDir
     srcs = (srcs', M.mapKeys moduleName srcs')
