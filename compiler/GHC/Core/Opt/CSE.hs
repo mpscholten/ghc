@@ -23,6 +23,7 @@ import GHC.Types.Tickish
 import GHC.Core.Map.Expr
 import GHC.Utils.Misc   ( filterOut, equalLength )
 import GHC.Utils.Panic
+import qualified GHC.Conc (par, pseq)
 import Data.Functor.Identity ( Identity (..) )
 import Data.List        ( mapAccumL )
 
@@ -380,11 +381,19 @@ body/rest of the module.
 
 cseProgram :: CoreProgram -> CoreProgram
 cseProgram binds
-  = snd (mapAccumL (cseBind TopLevel) init_env binds)
+  = snd (mapAccumL_par (cseBind TopLevel) init_env binds)
   where
     init_env  = emptyCSEnv $
                 mkInScopeSetList (bindersOfBinds binds)
                 -- Put all top-level binders into scope; it is possible to have
+
+-- | Like mapAccumL but with parallel evaluation hints for better concurrency
+mapAccumL_par :: (acc -> x -> (acc, y)) -> acc -> [x] -> (acc, [y])
+mapAccumL_par _ acc [] = (acc, [])
+mapAccumL_par f acc (x:xs) = 
+    let (acc', y) = f acc x
+        (acc'', ys) = mapAccumL_par f acc' xs
+    in y `GHC.Conc.par` (ys `GHC.Conc.pseq` (acc'', y:ys))
                 -- forward references.  See Note [Glomming] in GHC.Core.Opt.OccurAnal
                 -- Missing this caused #25468
 
