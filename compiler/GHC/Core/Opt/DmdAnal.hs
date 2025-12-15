@@ -49,6 +49,7 @@ import GHC.Utils.Misc
 import GHC.Utils.Panic
 import GHC.Utils.Outputable
 
+import Control.Parallel (par, pseq)
 import Data.List        ( mapAccumL )
 
 {-
@@ -103,7 +104,9 @@ dmdAnalProgram opts fam_envs rules binds
           = WithDmdType (body_ty `plusDmdType` keep_alive_roots env' (bindersOf b)) bs'
 
     cons_up :: WithDmdType (DmdResult b [b]) -> WithDmdType [b]
-    cons_up (WithDmdType dmd_ty (R b' bs')) = WithDmdType dmd_ty (b' : bs')
+    cons_up (WithDmdType dmd_ty (R b' bs')) = 
+        -- Add parallel evaluation hint for better concurrency
+        b' `par` (bs' `pseq` WithDmdType dmd_ty (b' : bs'))
 
     keep_alive_roots :: AnalEnv -> [Id] -> DmdEnv
     -- See Note [Absence analysis for stable unfoldings and RULES]
