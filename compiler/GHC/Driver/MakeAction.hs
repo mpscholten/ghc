@@ -48,7 +48,7 @@ import Control.Monad.Trans.Maybe
 mkWorkerLimit :: DynFlags -> IO WorkerLimit
 mkWorkerLimit dflags =
   case parMakeCount dflags of
-    Nothing -> pure $ num_procs 1
+    Nothing -> num_procs <$> getNumProcessors
     Just (ParMakeSemaphore h) -> pure (JSemLimit (SemaphoreName h))
     Just ParMakeNumProcessors -> num_procs <$> getNumProcessors
     Just (ParMakeThisMany n) -> pure $ num_procs n
