@@ -68,7 +68,6 @@ import GHC.Utils.Logger
 import GHC.Utils.Misc
 
 import Control.Monad
-import Control.Parallel (par, pseq)
 import Data.List.NonEmpty (NonEmpty (..))
 
 {-
@@ -220,8 +219,7 @@ simplTopBinds env0 binds0
     simpl_binds env (bind:binds) = do { (float,  env1) <- simpl_bind env bind
                                       ; (floats, env2) <- simpl_binds env1 binds
                                       -- See Note [Bangs in the Simplifier]
-                                      -- Add parallel evaluation hint for better concurrency
-                                      ; let !floats1 = float `par` (floats `pseq` (float `addFloats` floats))
+                                      ; let !floats1 = float `addFloats` floats
                                       ; return (floats1, env2) }
 
     simpl_bind env (Rec pairs)
