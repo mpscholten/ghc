@@ -567,7 +567,7 @@ mkNode pkg qual ss p (Node s leaf _pkg srcPkg short ts) =
 --------------------------------------------------------------------------------
 
 data JsonIndexEntry = JsonIndexEntry
-  { jieHtmlFragment :: Text
+  { jieHtmlFragment :: Builder.Builder
   , jieName :: Text
   , jieModule :: Text
   , jieLink :: Text
@@ -655,7 +655,7 @@ ppJsonIndex odir maybe_source_url maybe_wiki_url unicode pkg qual_opt ifaces ins
       | Just item_html <- processExport True links_info unicode pkg qual item =
           Just
             JsonIndexEntry
-              { jieHtmlFragment = Text.decodeUtf8Lenient (LBS.toStrict (Builder.toLazyByteString (showHtmlFragment item_html)))
+              { jieHtmlFragment = showHtmlFragment item_html
               , jieName = Text.pack (unwords (map getOccString names))
               , jieModule = Text.pack (moduleString mdl)
               , jieLink = LText.toStrict $ fromMaybe "" (listToMaybe (map (nameLink mdl) names))

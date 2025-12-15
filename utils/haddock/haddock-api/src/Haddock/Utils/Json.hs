@@ -122,6 +122,9 @@ instance ToJSON Word64 where toJSON = Number . realToFrac
 -- | Possibly lossy due to conversion to 'Double'
 instance ToJSON Integer where toJSON = Number . fromInteger
 
+instance ToJSON Builder where
+  toJSON = String . T.decodeUtf8Lenient . BSL.toStrict . BB.toLazyByteString
+
 ------------------------------------------------------------------------------
 -- 'BB.Builder'-based encoding
 
@@ -333,6 +336,10 @@ instance FromJSON () where
 instance FromJSON Text where
   parseJSON (String s) = pure s
   parseJSON v = typeMismatch "Text" v
+
+instance FromJSON Builder where
+  parseJSON (String s) = pure $ BB.byteString (T.encodeUtf8 s)
+  parseJSON v = typeMismatch "Builder" v
 
 instance FromJSON Char where
   parseJSON = withString "Char" parseChar
