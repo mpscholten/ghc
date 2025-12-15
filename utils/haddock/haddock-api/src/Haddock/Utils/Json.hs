@@ -51,6 +51,8 @@ import Data.Monoid
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
+import qualified Data.Text.Lazy as TL
+import qualified Data.Text.Lazy.Encoding as TL
 import Data.Word
 import GHC.Natural
 import qualified Text.Parsec.ByteString.Lazy as Parsec.Lazy
@@ -166,7 +168,7 @@ encodeStringBB str = BB.char8 '"' <> go str <> BB.char8 '"'
 
 -- | Serialise value as JSON-encoded Unicode 'String'
 encodeToString :: ToJSON a => a -> String
-encodeToString = T.unpack . T.decodeUtf8 . BSL.toStrict . BB.toLazyByteString . encodeToBuilder
+encodeToString = TL.unpack . TL.decodeUtf8 . BB.toLazyByteString . encodeToBuilder
 
 ------------------------------------------------------------------------------
 -- helpers
