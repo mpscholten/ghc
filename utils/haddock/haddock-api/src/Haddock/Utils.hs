@@ -67,9 +67,9 @@ module Haddock.Utils
   , out
   ) where
 
-import Control.Concurrent (forkIO)
+import Control.Concurrent (forkFinally)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
-import Control.Exception (SomeException, catch, throwIO)
+import Control.Exception (SomeException, throwIO)
 import Control.Monad.Catch (MonadMask, bracket_)
 import Control.Monad.IO.Class (MonadIO (..))
 import Data.Char (chr, isAlpha, isAlphaNum, isAscii, ord)
@@ -148,22 +148,22 @@ mapConcurrently_ f xs = do
   -- Create MVars to wait for completion and collect results
   resultMVars <- mapM (const newEmptyMVar) xs
 
-  -- Fork a thread for each element
+  -- Fork a thread for each element using forkFinally for proper exception handling
   mapM_ forkThread (zip xs resultMVars)
 
   -- Wait for all threads and collect any errors
   results <- mapM takeMVar resultMVars
 
   -- Re-throw the first exception if any
-  case [err | Just err <- results] of
+  case [err | Left err <- results] of
     (err:_) -> throwIO err
     [] -> return ()
   where
-    forkThread (x, resultMVar) = forkIO $ do
-      result <- catch (f x >> return Nothing)
-                      (\(e :: SomeException) -> return (Just e))
-      -- putMVar is safe here because resultMVar is always empty
-      putMVar resultMVar result
+    forkThread (x, resultMVar) =
+      forkFinally (f x) $ \result -> do
+        -- putMVar is safe here because resultMVar is always empty
+        -- forkFinally ensures this cleanup runs even with async exceptions
+        putMVar resultMVar result
 
 --------------------------------------------------------------------------------
 
