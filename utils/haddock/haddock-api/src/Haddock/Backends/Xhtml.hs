@@ -192,7 +192,7 @@ ppHtml
         visible_ifaces
         []
 
-    mapM_
+    mapConcurrently_
       ( ppHtmlModule
           odir
           doctitle

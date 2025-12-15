@@ -1,5 +1,6 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# OPTIONS_GHC -Wno-incomplete-record-updates #-}
 
 -----------------------------------------------------------------------------
@@ -54,6 +55,9 @@ module Haddock.Utils
   , replace
   , spanWith
 
+    -- * Concurrency utilities
+  , mapConcurrently_
+
     -- * Logging
   , parseVerbosity
   , Verbosity (..)
@@ -85,6 +89,10 @@ import Documentation.Haddock.Doc (emptyMetaDoc)
 import Haddock.Types
 import Data.Text.Lazy (Text)
 import qualified Data.Text.Lazy as LText
+
+import Control.Concurrent (forkIO)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
+import Control.Exception (SomeException, catch, throwIO)
 
 --------------------------------------------------------------------------------
 
@@ -333,6 +341,41 @@ html_xrefs = unsafePerformIO (readIORef html_xrefs_ref)
 {-# NOINLINE html_xrefs' #-}
 html_xrefs' :: Map ModuleName FilePath
 html_xrefs' = unsafePerformIO (readIORef html_xrefs_ref')
+
+-- * Concurrency utilities
+
+--------------------------------------------------------------------------------
+
+-- | Execute an action for each element of a list concurrently.
+-- If any action throws an exception, all other actions are allowed to complete,
+-- then one of the exceptions is re-thrown. The order of exception re-throwing
+-- corresponds to the order of elements in the input list, not the chronological
+-- order in which exceptions occurred.
+mapConcurrently_ :: (a -> IO ()) -> [a] -> IO ()
+mapConcurrently_ _ [] = return ()
+mapConcurrently_ f xs = do
+  -- Create MVars to wait for completion and collect results
+  resultMVars <- mapM (const newEmptyMVar) xs
+
+  -- Fork a thread for each element
+  mapM_ forkThread (zip xs resultMVars)
+
+  -- Wait for all threads and collect any errors
+  results <- mapM takeMVar resultMVars
+
+  -- Re-throw the first exception if any
+  case [err | Just err <- results] of
+    (err:_) -> throwIO err
+    [] -> return ()
+  where
+    forkThread (x, resultMVar) = forkIO $ do
+      result <- catch (f x >> return Nothing)
+                      (\(e :: SomeException) -> return (Just e))
+      -- putMVar is safe here because resultMVar is always empty
+      putMVar resultMVar result
+
+--------------------------------------------------------------------------------
+
 
 -----------------------------------------------------------------------------
 
