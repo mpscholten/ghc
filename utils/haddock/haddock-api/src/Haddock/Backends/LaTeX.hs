@@ -27,6 +27,7 @@ import Data.List (sort)
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Map as Map
 import qualified Data.Maybe as Maybe
+import qualified Data.Text as T
 import GHC hiding (HsTypeGhcPsExt (..), fromMaybeContext)
 import GHC.Core.Type (Specificity (..))
 import GHC.Data.FastString (unpackFS)
@@ -1550,10 +1551,10 @@ data StringContext
 
 latexStripTrailingWhitespace :: Doc a -> Doc a
 latexStripTrailingWhitespace (DocString s)
-  | null s' = DocEmpty
-  | otherwise = DocString s
+  | T.null s' = DocEmpty
+  | otherwise = DocString s'
   where
-    s' = reverse (dropWhile isSpace (reverse s))
+    s' = T.dropWhileEnd isSpace s
 latexStripTrailingWhitespace (DocAppend l r)
   | DocEmpty <- r' = latexStripTrailingWhitespace l
   | otherwise = DocAppend l r'
