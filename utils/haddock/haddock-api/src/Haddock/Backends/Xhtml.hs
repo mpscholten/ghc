@@ -1064,7 +1064,7 @@ numberSectionHeadings = go 1
     go n (other : es) =
       other : go n es
 
-    collectAnchors :: DocH (Wrap (ModuleName, OccName)) (Wrap DocName) -> [String]
+    collectAnchors :: DocH (Wrap (ModuleName, OccName)) (Wrap DocName) -> [T.Text]
     collectAnchors (DocAppend a b) = collectAnchors a ++ collectAnchors b
     collectAnchors (DocAName a) = [a]
     collectAnchors _ = []

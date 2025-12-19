@@ -9,6 +9,7 @@ module Haddock.Interface.Json
 import Control.Arrow
 import Data.Map (Map)
 import qualified Data.Map as Map
+import qualified Data.Text as T
 import GHC.Types.Fixity
 import GHC.Types.Name
 import GHC.Unit.Module
@@ -86,7 +87,7 @@ jsonDoc (DocAppend x y) =
 jsonDoc (DocString s) =
   jsonObject
     [ ("tag", jsonString "DocString")
-    , ("string", jsonString s)
+    , ("string", jsonString (T.unpack s))
     ]
 jsonDoc (DocParagraph x) =
   jsonObject
@@ -106,7 +107,7 @@ jsonDoc (DocIdentifierUnchecked modName) =
 jsonDoc (DocModule (ModLink m _l)) =
   jsonObject
     [ ("tag", jsonString "DocModule")
-    , ("string", jsonString m)
+    , ("string", jsonString (T.unpack m))
     ]
 jsonDoc (DocWarning x) =
   jsonObject
@@ -160,7 +161,7 @@ jsonDoc (DocHyperlink hyperlink) =
   where
     jsonHyperlink Hyperlink{..} =
       jsonObject
-        [ ("hyperlinkUrl", jsonString hyperlinkUrl)
+        [ ("hyperlinkUrl", jsonString (T.unpack hyperlinkUrl))
         , ("hyperlinkLabel", jsonMaybe jsonDoc hyperlinkLabel)
         ]
 jsonDoc (DocPic picture) =
@@ -171,28 +172,28 @@ jsonDoc (DocPic picture) =
   where
     jsonPicture Picture{..} =
       jsonObject
-        [ ("pictureUrl", jsonString pictureUri)
-        , ("pictureLabel", jsonMaybe jsonString pictureTitle)
+        [ ("pictureUrl", jsonString (T.unpack pictureUri))
+        , ("pictureLabel", jsonMaybe (jsonString . T.unpack) pictureTitle)
         ]
 jsonDoc (DocMathInline s) =
   jsonObject
     [ ("tag", jsonString "DocMathInline")
-    , ("string", jsonString s)
+    , ("string", jsonString (T.unpack s))
     ]
 jsonDoc (DocMathDisplay s) =
   jsonObject
     [ ("tag", jsonString "DocMathDisplay")
-    , ("string", jsonString s)
+    , ("string", jsonString (T.unpack s))
     ]
 jsonDoc (DocAName s) =
   jsonObject
     [ ("tag", jsonString "DocAName")
-    , ("string", jsonString s)
+    , ("string", jsonString (T.unpack s))
     ]
 jsonDoc (DocProperty s) =
   jsonObject
     [ ("tag", jsonString "DocProperty")
-    , ("string", jsonString s)
+    , ("string", jsonString (T.unpack s))
     ]
 jsonDoc (DocExamples examples) =
   jsonObject
@@ -202,8 +203,8 @@ jsonDoc (DocExamples examples) =
   where
     jsonExample Example{..} =
       jsonObject
-        [ ("exampleExpression", jsonString exampleExpression)
-        , ("exampleResult", jsonArray (fmap jsonString exampleResult))
+        [ ("exampleExpression", jsonString (T.unpack exampleExpression))
+        , ("exampleResult", jsonArray (fmap (jsonString . T.unpack) exampleResult))
         ]
 jsonDoc (DocHeader header) =
   jsonObject
