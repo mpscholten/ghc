@@ -54,9 +54,9 @@ docAppend (DocUnorderedList ds1) (DocUnorderedList ds2) = DocUnorderedList (ds1 
 docAppend (DocUnorderedList ds1) (DocAppend (DocUnorderedList ds2) d) = DocAppend (DocUnorderedList (ds1 ++ ds2)) d
 docAppend DocEmpty d = d
 docAppend d DocEmpty = d
-docAppend (DocString s1) (DocString s2) = DocString (s1 ++ s2)
-docAppend (DocAppend d (DocString s1)) (DocString s2) = DocAppend d (DocString (s1 ++ s2))
-docAppend (DocString s1) (DocAppend (DocString s2) d) = DocAppend (DocString (s1 ++ s2)) d
+docAppend (DocString s1) (DocString s2) = DocString (T.append s1 s2)
+docAppend (DocAppend d (DocString s1)) (DocString s2) = DocAppend d (DocString (T.append s1 s2))
+docAppend (DocString s1) (DocAppend (DocString s2) d) = DocAppend (DocString (T.append s1 s2)) d
 docAppend d1 d2 = DocAppend d1 d2
 
 -- again to make parsing easier - we spot a paragraph whose only item
