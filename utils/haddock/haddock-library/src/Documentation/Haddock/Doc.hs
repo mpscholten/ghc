@@ -11,6 +11,7 @@ module Documentation.Haddock.Doc
 
 import Control.Applicative ((<|>))
 import Data.Char (isSpace)
+import qualified Data.Text as T
 
 import Documentation.Haddock.Types
 
