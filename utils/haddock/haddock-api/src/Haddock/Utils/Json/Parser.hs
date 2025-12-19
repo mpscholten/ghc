@@ -6,14 +6,13 @@ module Haddock.Utils.Json.Parser
 
 import Control.Applicative (Alternative (..))
 import Control.Monad (MonadPlus (..))
-import qualified Data.ByteString.Lazy.Char8 as BSCL
 import Data.Char (isHexDigit)
 import Data.Functor (($>))
 import qualified Data.List as List
 import Data.Text (Text)
 import qualified Data.Text as T
 import Numeric
-import Text.Parsec.ByteString.Lazy (Parser)
+import Text.Parsec.Text (Parser)
 import Text.ParserCombinators.Parsec ((<?>))
 import qualified Text.ParserCombinators.Parsec as Parsec
 import Prelude hiding (null)

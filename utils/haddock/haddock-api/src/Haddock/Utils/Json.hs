@@ -50,9 +50,11 @@ import Data.Monoid
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
+import qualified Data.Text.Lazy as TL
+import qualified Data.Text.Lazy.IO as TL
 import Data.Word
 import GHC.Natural
-import qualified Text.Parsec.ByteString.Lazy as Parsec.Lazy
+import qualified Text.Parsec.Text as Parsec.Text
 import qualified Text.ParserCombinators.Parsec as Parsec
 
 import Haddock.Utils.Json.Parser
@@ -491,7 +493,7 @@ explicitParseFieldMaybe p obj key =
 
 decodeWith :: (Value -> Result a) -> BSL.ByteString -> Maybe a
 decodeWith decoder bsl =
-  case Parsec.parse parseJSONValue "<input>" bsl of
+  case Parsec.parse parseJSONValue "<input>" (TL.decodeUtf8 bsl) of
     Left _ -> Nothing
     Right json ->
       case decoder json of
@@ -503,7 +505,7 @@ decode = decodeWith fromJSON
 
 eitherDecodeWith :: (Value -> Result a) -> BSL.ByteString -> Either String a
 eitherDecodeWith decoder bsl =
-  case Parsec.parse parseJSONValue "<input>" bsl of
+  case Parsec.parse parseJSONValue "<input>" (TL.decodeUtf8 bsl) of
     Left parsecError -> Left (show parsecError)
     Right json ->
       case decoder json of
@@ -515,7 +517,7 @@ eitherDecode = eitherDecodeWith fromJSON
 
 decodeFile :: FromJSON a => FilePath -> IO (Maybe a)
 decodeFile filePath = do
-  parsecResult <- Parsec.Lazy.parseFromFile parseJSONValue filePath
+  parsecResult <- Parsec.Text.parseFromFile parseJSONValue filePath
   case parsecResult of
     Right r ->
       case fromJSON r of
@@ -525,7 +527,7 @@ decodeFile filePath = do
 
 eitherDecodeFile :: FromJSON a => FilePath -> IO (Either String a)
 eitherDecodeFile filePath = do
-  parsecResult <- Parsec.Lazy.parseFromFile parseJSONValue filePath
+  parsecResult <- Parsec.Text.parseFromFile parseJSONValue filePath
   case parsecResult of
     Right r ->
       case fromJSON r of
