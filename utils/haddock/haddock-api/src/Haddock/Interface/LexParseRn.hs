@@ -30,6 +30,8 @@ import Data.Functor
 import Data.List (maximumBy, (\\))
 import Data.Ord
 import qualified Data.Set as Set
+import Data.Text (Text)
+import qualified Data.Text as T
 import GHC
 import GHC.Data.EnumSet as EnumSet
 import GHC.Data.FastString (unpackFS)
@@ -57,7 +59,7 @@ processDocStringsParas
   -> [HsDoc GhcRn]
   -> IfM m (MDoc Name)
 processDocStringsParas parserOpts sDocContext pkg hdss =
-  overDocF (rename sDocContext $ hsDocRenamer hds) $ parseParas parserOpts pkg (renderHsDocStrings $ hsDocString hds)
+  overDocF (rename sDocContext $ hsDocRenamer hds) $ parseParas parserOpts pkg (T.pack $ renderHsDocStrings $ hsDocString hds)
   where
     hds :: WithHsDocIdentifiers [HsDocString] GhcRn
     hds = WithHsDocIdentifiers (map hsDocString hdss) (concatMap hsDocIdentifiers hdss)
@@ -70,7 +72,7 @@ processDocStringParas
   -> HsDoc GhcRn
   -> IfM m (MDoc Name)
 processDocStringParas parserOpts sDocContext pkg hds =
-  overDocF (rename sDocContext $ hsDocRenamer hds) $ parseParas parserOpts pkg (renderHsDocString $ hsDocString hds)
+  overDocF (rename sDocContext $ hsDocRenamer hds) $ parseParas parserOpts pkg (T.pack $ renderHsDocString $ hsDocString hds)
 
 processDocString
   :: MonadIO m
@@ -79,7 +81,7 @@ processDocString
   -> HsDoc GhcRn
   -> IfM m (Doc Name)
 processDocString parserOpts sDocContext hds =
-  rename sDocContext (hsDocRenamer hds) $ parseString parserOpts (renderHsDocString $ hsDocString hds)
+  rename sDocContext (hsDocRenamer hds) $ parseString parserOpts (T.pack $ renderHsDocString $ hsDocString hds)
 
 processModuleHeader
   :: MonadIO m
@@ -97,7 +99,7 @@ processModuleHeader mLanguage parserOpts sDocContext pkgName safety mayLang extS
     case mayStr of
       Nothing -> return failure
       Just hsDoc -> do
-        let str = renderHsDocString $ hsDocString hsDoc
+        let str = T.pack $ renderHsDocString $ hsDocString hsDoc
             (hmi, doc) = parseModuleHeader parserOpts pkgName str
             renamer = hsDocRenamer hsDoc
         !descr <- case hmi_description hmi of

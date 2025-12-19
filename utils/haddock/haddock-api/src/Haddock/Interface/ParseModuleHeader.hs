@@ -18,6 +18,8 @@ module Haddock.Interface.ParseModuleHeader (parseModuleHeader) where
 import Control.Applicative (Alternative (..))
 import Control.Monad (ap)
 import Data.Char
+import Data.Text (Text)
+import qualified Data.Text as T
 import GHC.Parser.Lexer (ParserOpts)
 
 import Haddock.Parser
@@ -29,13 +31,13 @@ import Haddock.Types
 -- NB.  The headers must be given in the order Module, Description,
 -- Copyright, License, Maintainer, Stability, Portability, except that
 -- any or all may be omitted.
-parseModuleHeader :: ParserOpts -> Maybe Package -> String -> (HaddockModInfo NsRdrName, MDoc NsRdrName)
+parseModuleHeader :: ParserOpts -> Maybe Package -> Text -> (HaddockModInfo NsRdrName, MDoc NsRdrName)
 parseModuleHeader parserOpts pkgName str0 =
   let
     kvs :: [(String, String)]
-    str1 :: String
+    str1 :: Text
 
-    (kvs, str1) = maybe ([], str0) id $ runP fields str0
+    (kvs, str1) = maybe ([], str0) (\(ks, s) -> (ks, T.pack s)) $ runP fields (T.unpack str0)
 
     -- trim whitespaces
     trim :: String -> String
@@ -54,7 +56,7 @@ parseModuleHeader parserOpts pkgName str0 =
     portabilityOpt = getKey "Portability"
    in
     ( HaddockModInfo
-        { hmi_description = parseString parserOpts <$> descriptionOpt
+        { hmi_description = parseString parserOpts . T.pack <$> descriptionOpt
         , hmi_copyright = copyrightOpt
         , hmi_license = spdxLicenceOpt <|> licenseOpt <|> licenceOpt
         , hmi_maintainer = maintainerOpt
