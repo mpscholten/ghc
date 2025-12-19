@@ -42,6 +42,7 @@ import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes, isJust, mapMaybe, maybeToList)
 import Data.Traversable (for)
+import qualified Data.Text as T
 import GHC hiding (lookupName)
 import GHC.Builtin.Names
 import GHC.Builtin.Types.Prim
@@ -363,7 +364,7 @@ parseWarning parserOpts sDocContext w = case w of
     fsToDoc fs = GeneratedDocString $ HsDocStringChunk (bytesFS fs)
 
     format x bs =
-      DocWarning . DocParagraph . DocAppend (DocString x)
+      DocWarning . DocParagraph . DocAppend (DocString (T.pack (unpackFS x)))
         <$> foldrM (\doc rest -> docAppend <$> processDocString parserOpts sDocContext doc <*> pure rest) DocEmpty bs
 
 -------------------------------------------------------------------------------
