@@ -20,7 +20,6 @@ import Data.Bifoldable
 import Data.Bifunctor
 import Data.Bitraversable
 import Data.Text (Text)
-import qualified Data.Text as T
 
 -- | A @\@since@ declaration.
 data MetaSince = MetaSince
