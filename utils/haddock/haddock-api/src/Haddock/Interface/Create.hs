@@ -532,7 +532,7 @@ unrestrictedModExports sDocContext thisMod ifaceMap instIfaceMap avails mod_name
         case Map.lookup mod_name instIfaceMap' of
           Just iface -> pure $ Just (instMod iface, mkNameSet (instExports iface))
           Nothing -> do
-            warn $
+            warn $ T.pack $
               "Warning: "
                 ++ pretty sDocContext thisMod
                 ++ ": Could not find "
@@ -617,7 +617,7 @@ availExportItem
                     -- with signature inheritance
                     case Map.lookup (nameModule t) instIfaceMap of
                       Nothing -> do
-                        warn $
+                        warn $ T.pack $
                           "Warning: "
                             ++ pretty sDocContext thisMod
                             ++ ": Couldn't find .haddock for export "
