@@ -41,6 +41,7 @@ import Haddock.Backends.Xhtml.Utils
 import Haddock.GhcUtils
 import Haddock.Types
 import Haddock.Utils
+import qualified Data.Text as T
 import qualified Data.Text.Lazy as LText
 
 -- | Indicator of how to render a 'DocName' into 'Html'
