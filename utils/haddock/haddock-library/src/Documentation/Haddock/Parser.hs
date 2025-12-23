@@ -30,7 +30,7 @@ import Control.Arrow (first)
 import Control.Monad
 import Data.Char (chr, isAlpha, isSpace, isUpper)
 import Data.Functor (($>))
-import Data.List (elemIndex, intercalate, intersperse, unfoldr, unsnoc)
+import Data.List (elemIndex, unfoldr, unsnoc)
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Monoid
 import qualified Data.Set as Set
