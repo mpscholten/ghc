@@ -494,7 +494,7 @@ explicitParseFieldMaybe p obj key =
 
 decodeWith :: (Value -> Result a) -> BSL.ByteString -> Maybe a
 decodeWith decoder bsl =
-  case Parsec.parse parseJSONValue "<input>" (TL.decodeUtf8 bsl) of
+  case Parsec.parse parseJSONValue "<input>" (TL.toStrict $ TL.decodeUtf8 bsl) of
     Left _ -> Nothing
     Right json ->
       case decoder json of
@@ -506,7 +506,7 @@ decode = decodeWith fromJSON
 
 eitherDecodeWith :: (Value -> Result a) -> BSL.ByteString -> Either String a
 eitherDecodeWith decoder bsl =
-  case Parsec.parse parseJSONValue "<input>" (TL.decodeUtf8 bsl) of
+  case Parsec.parse parseJSONValue "<input>" (TL.toStrict $ TL.decodeUtf8 bsl) of
     Left parsecError -> Left (show parsecError)
     Right json ->
       case decoder json of
