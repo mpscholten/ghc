@@ -43,6 +43,7 @@ import GHC.Types.InlinePragma as Hs
 import GHC.Types.ForeignCall
 import GHC.Types.Unique
 import GHC.Types.SourceText
+import GHC.Utils.Encoding (utf8EncodeByteString)
 import GHC.Utils.Lexeme
 import GHC.Utils.Misc
 import GHC.Data.FastString
@@ -974,9 +975,9 @@ cvtPragmaD (CompleteP cls mty)
 cvtPragmaD (SCCP nm str) = do
   nm' <- vcNameN nm
   str' <- traverse (\s ->
-    returnLA $ StringLiteral NoSourceText (mkFastString s) Nothing) str
+    returnLA $ StringLiteral NoSourceText (utf8EncodeByteString s) Nothing) str
   returnJustLA $ Hs.SigD noExtField
-    $ SCCFunSig (noAnn, SourceText $ fsLit "{-# SCC") nm' str'
+    $ SCCFunSig (noAnn, SourceText $ utf8EncodeByteString "{-# SCC") nm' str'
 
 dfltActivation :: TH.Inline -> ActivationGhc
 dfltActivation TH.NoInline = NeverActive
