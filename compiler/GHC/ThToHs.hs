@@ -353,10 +353,10 @@ cvtDec (InstanceD o ctxt ty decs)
   where
   overlap pragma =
     case pragma of
-      TH.Overlaps      -> Hs.Overlaps     (SourceText $ fsLit "{-# OVERLAPS")
-      TH.Overlappable  -> Hs.Overlappable (SourceText $ fsLit "{-# OVERLAPPABLE")
-      TH.Overlapping   -> Hs.Overlapping  (SourceText $ fsLit "{-# OVERLAPPING")
-      TH.Incoherent    -> Hs.Incoherent   (SourceText $ fsLit "{-# INCOHERENT")
+      TH.Overlaps      -> Hs.Overlaps     (SourceText $ utf8EncodeByteString "{-# OVERLAPS")
+      TH.Overlappable  -> Hs.Overlappable (SourceText $ utf8EncodeByteString "{-# OVERLAPPABLE")
+      TH.Overlapping   -> Hs.Overlapping  (SourceText $ utf8EncodeByteString "{-# OVERLAPPING")
+      TH.Incoherent    -> Hs.Incoherent   (SourceText $ utf8EncodeByteString "{-# INCOHERENT")
 
 
 
@@ -890,9 +890,9 @@ cvtPragmaD (InlineP nm inline rm phases)
          -- (e.g., `INLINE`d pattern synonyms, cf. #23203)
          nm' <- vcNameN nm
        ; let dflt = dfltActivation inline
-       ; let src TH.NoInline  = fsLit "{-# NOINLINE"
-             src TH.Inline    = fsLit "{-# INLINE"
-             src TH.Inlinable = fsLit "{-# INLINABLE"
+       ; let src TH.NoInline  = utf8EncodeByteString "{-# NOINLINE"
+             src TH.Inline    = utf8EncodeByteString "{-# INLINE"
+             src TH.Inlinable = utf8EncodeByteString "{-# INLINABLE"
        ; let ip   = InlinePragma { inl_ext    = toSrcTxt inline
                                  , inl_inline = cvtInline inline
                                  , inl_rule   = cvtRuleMatch rm
@@ -908,13 +908,13 @@ cvtPragmaD (OpaqueP nm)
                                , inl_rule   = Hs.FunLike
                                , inl_act    = NeverActive }
                   where
-                    srcTxt = SourceText $ fsLit "{-# OPAQUE"
+                    srcTxt = SourceText $ utf8EncodeByteString "{-# OPAQUE"
        ; returnJustLA $ Hs.SigD noExtField $ InlineSig noAnn nm' ip }
 
 cvtPragmaD (SpecialiseInstP ty)
   = do { ty' <- cvtSigType ty
        ; returnJustLA $ Hs.SigD noExtField $
-         SpecInstSig (noAnn, (SourceText $ fsLit "{-# SPECIALISE")) ty' }
+         SpecInstSig (noAnn, (SourceText $ utf8EncodeByteString "{-# SPECIALISE")) ty' }
 
 cvtPragmaD (SpecialiseEP ty_bndrs tm_bndrs exp inline phases)
   = do { ty_bndrs' <- traverse cvtTvs ty_bndrs
@@ -942,7 +942,7 @@ cvtPragmaD (RuleP nm ty_bndrs tm_bndrs lhs rhs phases)
                           , rd_lhs  = lhs'
                           , rd_rhs  = rhs' }
        ; returnJustLA $ Hs.RuleD noExtField
-            $ HsRules { rds_ext = (noAnn, SourceText $ fsLit "{-# RULES")
+            $ HsRules { rds_ext = (noAnn, SourceText $ utf8EncodeByteString "{-# RULES")
                       , rds_rules = [rule] }
 
           }
@@ -958,7 +958,7 @@ cvtPragmaD (AnnP target exp)
            n' <- vcName n
            wrapParLA ValueAnnProvenance n'
        ; returnJustLA $ Hs.AnnD noExtField
-                     $ HsAnnotation (noAnn, (SourceText $ fsLit "{-# ANN")) target' exp'
+                     $ HsAnnotation (noAnn, (SourceText $ utf8EncodeByteString "{-# ANN")) target' exp'
        }
 
 -- NB: This is the only place in GHC.ThToHs that makes use of the `setL`
@@ -1008,14 +1008,14 @@ cvtRuleBndr (TypedRuleVar n ty)
 
 cvtInlinePhases :: Maybe Inline -> Phases -> InlinePragma GhcPs
 cvtInlinePhases inline phases =
-  let src TH.NoInline  = fsLit "{-# SPECIALISE NOINLINE"
-      src TH.Inline    = fsLit "{-# SPECIALISE INLINE"
-      src TH.Inlinable = fsLit "{-# SPECIALISE INLINE"
+  let src TH.NoInline  = utf8EncodeByteString "{-# SPECIALISE NOINLINE"
+      src TH.Inline    = utf8EncodeByteString "{-# SPECIALISE INLINE"
+      src TH.Inlinable = utf8EncodeByteString "{-# SPECIALISE INLINE"
       (inline', dflt, srcText) = case inline of
         Just inline1 -> (cvtInline inline1, dfltActivation inline1,
                          toSrcTxt inline1)
         Nothing      -> (NoUserInlinePrag,   AlwaysActive,
-                         SourceText $ fsLit "{-# SPECIALISE")
+                         SourceText $ utf8EncodeByteString "{-# SPECIALISE")
         where
          toSrcTxt a = SourceText $ src a
   in InlinePragma { inl_ext    = srcText
@@ -1468,7 +1468,7 @@ cvtLit _ = panic "Convert.cvtLit: Unexpected literal"
         -- "GHC.ThToHs", hence panic
 
 quotedSourceText :: String -> SourceText
-quotedSourceText s = SourceText $ fsLit $ "\"" ++ s ++ "\""
+quotedSourceText s = SourceText $ utf8EncodeByteString $ "\"" ++ s ++ "\""
 
 cvtPats :: Traversable f => f (TH.Pat) -> CvtM (f (Hs.LPat GhcPs))
 cvtPats pats = mapM cvtPat pats

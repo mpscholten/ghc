@@ -34,6 +34,7 @@ import GHC.Types.Demand
 import GHC.Types.Cpr
 import GHC.Types.SourceText
 import GHC.Types.Unique
+import GHC.Utils.Encoding (utf8EncodeByteString)
 
 import GHC.Utils.Misc
 import GHC.Utils.Outputable
@@ -911,7 +912,7 @@ mkStrWrapperInlinePrag (InlinePragma { inl_inline = fn_inl
 
                  , inl_rule   = rule_info }  -- RuleMatchInfo is (and must be) unaffected
   where
-    srcTxt = SourceText $ fsLit "{-# INLINE"
+    srcTxt = SourceText $ utf8EncodeByteString "{-# INLINE"
     -- See Note [Wrapper activation]
     wrapper_phase = foldr (laterPhase . get_rule_phase) earliest_inline_phase rules
     earliest_inline_phase = beginPhase fn_act `laterPhase` nextPhase InitialPhase
