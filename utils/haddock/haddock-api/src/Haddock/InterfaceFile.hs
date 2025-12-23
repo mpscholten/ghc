@@ -517,10 +517,10 @@ instance Binary Meta where
 
 instance Binary MetaSince where
   put_ bh (MetaSince v p) = do
-    put_ bh v
+    put_ bh (T.unpack <$> v)
     put_ bh p
   get bh = do
-    v <- get bh
+    v <- fmap T.pack <$> get bh
     p <- get bh
     return (MetaSince v p)
 
@@ -542,7 +542,7 @@ instance (Binary mod, Binary id) => Binary (DocH mod id) where
     put_ bh ab
   put_ bh (DocString ac) = do
     putByte bh 2
-    put_ bh ac
+    put_ bh (T.unpack ac)
   put_ bh (DocParagraph ad) = do
     putByte bh 3
     put_ bh ad
@@ -575,7 +575,7 @@ instance (Binary mod, Binary id) => Binary (DocH mod id) where
     put_ bh x
   put_ bh (DocAName an) = do
     putByte bh 14
-    put_ bh an
+    put_ bh (T.unpack an)
   put_ bh (DocExamples ao) = do
     putByte bh 15
     put_ bh ao
@@ -587,7 +587,7 @@ instance (Binary mod, Binary id) => Binary (DocH mod id) where
     put_ bh ag
   put_ bh (DocProperty x) = do
     putByte bh 18
-    put_ bh x
+    put_ bh (T.unpack x)
   put_ bh (DocBold x) = do
     putByte bh 19
     put_ bh x
@@ -596,10 +596,10 @@ instance (Binary mod, Binary id) => Binary (DocH mod id) where
     put_ bh aa
   put_ bh (DocMathInline x) = do
     putByte bh 21
-    put_ bh x
+    put_ bh (T.unpack x)
   put_ bh (DocMathDisplay x) = do
     putByte bh 22
-    put_ bh x
+    put_ bh (T.unpack x)
   put_ bh (DocTable x) = do
     putByte bh 23
     put_ bh x
@@ -618,7 +618,7 @@ instance (Binary mod, Binary id) => Binary (DocH mod id) where
         ab <- get bh
         return (DocAppend aa ab)
       2 -> do
-        ac <- get bh
+        ac <- T.pack <$> get bh
         return (DocString ac)
       3 -> do
         ad <- get bh
@@ -628,7 +628,7 @@ instance (Binary mod, Binary id) => Binary (DocH mod id) where
         return (DocIdentifier ae)
       -- See note [The DocModule story]
       5 -> do
-        af <- get bh
+        af <- T.pack <$> get bh
         return $
           DocModule
             ModLink
@@ -660,7 +660,7 @@ instance (Binary mod, Binary id) => Binary (DocH mod id) where
         x <- get bh
         return (DocPic x)
       14 -> do
-        an <- get bh
+        an <- T.pack <$> get bh
         return (DocAName an)
       15 -> do
         ao <- get bh
@@ -672,7 +672,7 @@ instance (Binary mod, Binary id) => Binary (DocH mod id) where
         ag <- get bh
         return (DocWarning ag)
       18 -> do
-        x <- get bh
+        x <- T.pack <$> get bh
         return (DocProperty x)
       19 -> do
         x <- get bh
@@ -681,10 +681,10 @@ instance (Binary mod, Binary id) => Binary (DocH mod id) where
         aa <- get bh
         return (DocHeader aa)
       21 -> do
-        x <- get bh
+        x <- T.pack <$> get bh
         return (DocMathInline x)
       22 -> do
-        x <- get bh
+        x <- T.pack <$> get bh
         return (DocMathDisplay x)
       23 -> do
         x <- get bh
