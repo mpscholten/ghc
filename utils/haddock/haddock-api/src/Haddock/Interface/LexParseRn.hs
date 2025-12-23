@@ -293,4 +293,4 @@ hsDocRenamer hsDoc = \s cands -> nameSetElemsStable $ filterNameSet (nameMatches
     !env = hsDocIds hsDoc
     nameMatches s ok_ns n =
       let occ = occName n
-       in ok_ns (occNameSpace occ) && s == unpackFS (occNameFS occ)
+       in ok_ns (occNameSpace occ) && T.unpack s == unpackFS (occNameFS occ)
