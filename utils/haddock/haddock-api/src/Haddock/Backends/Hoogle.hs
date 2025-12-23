@@ -28,6 +28,7 @@ import Data.Char
 import Data.Foldable (toList)
 import Data.List (intercalate, isPrefixOf)
 import Data.Maybe
+import qualified Data.Text as T
 import Data.Version
 import GHC
 import GHC.Core.InstEnv
@@ -82,7 +83,7 @@ ppModule dflags sDocContext unit_state iface =
 -- | If the export item is an 'ExportDecl', get the attached Hoogle textual
 -- database entries for that export declaration.
 ppExportItem :: ExportItem DocNameI -> [String]
-ppExportItem (ExportDecl RnExportD{rnExpDHoogle = o}) = o
+ppExportItem (ExportDecl RnExportD{rnExpDHoogle = o}) = map T.unpack o
 ppExportItem _ = []
 
 ---------------------------------------------------------------------
@@ -415,8 +416,8 @@ type Tags = [Tag]
 box :: (a -> b) -> a -> [b]
 box f x = [f x]
 
-str :: String -> [Tag]
-str a = [Str a]
+str :: T.Text -> [Tag]
+str a = [Str (T.unpack a)]
 
 -- want things like paragraph, pre etc to be handled by blank lines in the source document
 -- and things like \n and \t converted away
