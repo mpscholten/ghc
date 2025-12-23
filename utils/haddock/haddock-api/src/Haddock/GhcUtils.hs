@@ -41,10 +41,12 @@ import Data.List.NonEmpty (NonEmpty (..))
 import Data.Maybe (fromMaybe, mapMaybe)
 import qualified Data.Set as Set
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as Text.Encoding
 import GHC hiding (HsTypeGhcPsExt (...))
 import GHC.Builtin.Types (liftedRepTy)
 import GHC.Core.TyCo.Rep (Type (..))
 import GHC.Core.Type (binderVar, isRuntimeRepVar)
+import GHC.Data.FastString (FastString, bytesFS)
 import GHC.Data.StringBuffer (StringBuffer)
 import qualified GHC.Data.StringBuffer as S
 import GHC.Driver.Session
@@ -72,11 +74,14 @@ import Haddock.Types (DocName, DocNameI, ExportInfo, XRecCond, HsTypeDocNameIExt
 moduleString :: Module -> String
 moduleString = moduleNameString . moduleName
 
+fastStringToText :: FastString -> T.Text
+fastStringToText = Text.Encoding.decodeUtf8 . bytesFS
+
 moduleText :: Module -> T.Text
-moduleText = T.pack . moduleString
+moduleText = fastStringToText . moduleNameFS . moduleName
 
 getOccText :: Name -> T.Text
-getOccText = T.pack . getOccString
+getOccText name = fastStringToText (occNameFS (nameOccName name))
 
 isNameSym :: Name -> Bool
 isNameSym = isSymOcc . nameOccName
