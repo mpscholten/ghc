@@ -1,3 +1,4 @@
+{-# LANGUAGE OverloadedStrings #-}
 -- | @since 1.4.5
 module Documentation.Haddock.Markup
   ( markup
