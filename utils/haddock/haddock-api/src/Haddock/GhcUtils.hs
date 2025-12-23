@@ -42,7 +42,7 @@ import Data.Maybe (fromMaybe, mapMaybe)
 import qualified Data.Set as Set
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as Text.Encoding
-import GHC hiding (HsTypeGhcPsExt (...))
+import GHC hiding (HsTypeGhcPsExt (..))
 import GHC.Builtin.Types (liftedRepTy)
 import GHC.Core.TyCo.Rep (Type (..))
 import GHC.Core.Type (binderVar, isRuntimeRepVar)
