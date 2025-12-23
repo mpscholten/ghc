@@ -282,9 +282,9 @@ ambiguous sDocContext x names = do
 
 -- | Printable representation of a wrapped and namespaced name
 showNsRdrName :: SDocContext -> Wrap NsRdrName -> Text
-showNsRdrName sDocContext = (\p i -> T.pack p <> "'" <> T.pack i <> "'") <$> prefix <*> ident
+showNsRdrName sDocContext = (\p i -> p <> "'" <> i <> "'") <$> prefix <*> ident
   where
-    ident = showWrapped (Outputable.renderWithContext sDocContext . ppr . rdrName)
+    ident = showWrapped (T.pack . Outputable.renderWithContext sDocContext . ppr . rdrName)
     prefix = renderNs . namespace . unwrap
 
 hsDocRenamer :: WithHsDocIdentifiers a GhcRn -> Renamer
