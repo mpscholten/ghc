@@ -122,9 +122,9 @@ parHtmlMarkup qual insertAnchors ppId =
 
     exampleToHtml (Example expression result) = htmlExample
       where
-        htmlExample = htmlPrompt +++ htmlExpression +++ toHtml (unlines result)
+        htmlExample = htmlPrompt +++ htmlExpression +++ toHtml (T.unpack $ T.unlines result)
         htmlPrompt = (thecode . toHtml $ (">>> " :: LText.Text)) ! [theclass "prompt"]
-        htmlExpression = (strong . thecode . toHtml $ expression ++ "\n") ! [theclass "userinput"]
+        htmlExpression = (strong . thecode . toHtml $ T.unpack $ expression <> "\n") ! [theclass "userinput"]
 
     makeOrdList :: HTML a => [(Int, a)] -> Html
     makeOrdList items = olist << map (\(index, a) -> li ! [intAttr "value" index] << a) items
@@ -229,7 +229,7 @@ renderMetaSince fmt currPkg (MetaSince{sincePackage = pkg, sinceVersion = ver}) 
     "Since: " ++ formatPkgMaybe pkg ++ formatVersion ver
   where
     formatVersion v = concat . intersperse "." $ map show v
-    formatPkgMaybe (Just p) | Just p /= currPkg = p ++ "-"
+    formatPkgMaybe (Just p) | Just p /= currPkg = T.unpack p ++ "-"
     formatPkgMaybe _ = ""
 
 -- | Goes through 'hackMarkup' to generate the 'Html' rather than
