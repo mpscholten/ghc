@@ -189,9 +189,8 @@ specialChar = "_/<@\"&'`#[ "
 -- before capturing their characters.
 string' :: Parser (DocH mod a)
 string' =
-  DocString . T.cons
-    <$> rawOrEscChar ""
-    <*> (T.pack <$> many (rawOrEscChar "(["))
+  DocString <$> (T.cons <$> rawOrEscChar "" <*> (T.pack <$> many (rawOrEscChar "([")))
+
     -- After the first character, stop for @\(@ or @\[@ math starters. (The
     -- first character won't start a valid math string because this parser
     -- should follow math parsers. But this parser is expected to accept at
