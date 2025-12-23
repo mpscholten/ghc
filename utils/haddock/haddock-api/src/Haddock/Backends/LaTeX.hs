@@ -1455,7 +1455,7 @@ latexMarkup =
   Markup
     { markupParagraph = \p v -> blockElem (p v (text "\\par"))
     , markupEmpty = \_ -> id
-    , markupString = \s v -> inlineElem (text (fixString v s))
+    , markupString = \s v -> inlineElem (text (fixString v (T.unpack s)))
     , markupAppend = \l r v -> l v . r v
     , markupIdentifier = \i v -> inlineElem (markupId v (fmap occName i))
     , markupIdentifierUnchecked = \i v -> inlineElem (markupId v (fmap snd i))
@@ -1465,7 +1465,7 @@ latexMarkup =
             Just lbl -> inlineElem . tt $ lbl v empty
             Nothing ->
               inlineElem
-                ( let (mdl, _ref) = break (== '#') m
+                ( let (mdl, _ref) = break (== '#') (T.unpack m)
                    in (tt (text mdl))
                 )
     , markupWarning = \p v -> p v
@@ -1474,15 +1474,15 @@ latexMarkup =
     , markupMonospaced = \p v -> inlineElem (markupMonospace p v)
     , markupUnorderedList = \p v -> blockElem (itemizedList (map (\p' -> p' v empty) p))
     , markupPic = \p _ -> inlineElem (markupPic p)
-    , markupMathInline = \p _ -> inlineElem (markupMathInline p)
-    , markupMathDisplay = \p _ -> blockElem (markupMathDisplay p)
+    , markupMathInline = \p _ -> inlineElem (markupMathInline (T.unpack p))
+    , markupMathDisplay = \p _ -> blockElem (markupMathDisplay (T.unpack p))
     , markupOrderedList = \p v -> blockElem (enumeratedList (map (\(_, p') -> p' v empty) p))
     , markupDefList = \l v -> blockElem (descriptionList (map (\(a, b) -> (a v empty, b v empty)) l))
     , markupCodeBlock = \p _ -> blockElem (quote (verb (p Verb empty)))
     , markupHyperlink = \(Hyperlink u l) v -> inlineElem (markupLink u (fmap (\x -> x v empty) l))
     , markupAName = \_ _ -> id -- TODO
-    , markupProperty = \p _ -> blockElem (quote (verb (text p)))
-    , markupExample = \e _ -> blockElem (quote (verb (text $ unlines $ map exampleToString e)))
+    , markupProperty = \p _ -> blockElem (quote (verb (text (T.unpack p))))
+    , markupExample = \e _ -> blockElem (quote (verb (text $ unlines $ map (T.unpack . exampleToString) e)))
     , markupHeader = \(Header l h) p -> blockElem (header l (h p empty))
     , markupTable = \(Table h b) p -> blockElem (table h b p)
     }
