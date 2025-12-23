@@ -1527,10 +1527,10 @@ latexMarkup =
     markupId v wrappedOcc =
       case v of
         Verb -> text (T.unpack i)
-        Mono -> text "\\haddockid" <> braces (text . latexMonoFilter $ i)
-        Plain -> text "\\haddockid" <> braces (text . latexFilter $ i)
+        Mono -> text "\\haddockid" <> braces (text . latexMonoFilter $ T.unpack i)
+        Plain -> text "\\haddockid" <> braces (text . latexFilter $ T.unpack i)
       where
-        i = showWrapped occNameString wrappedOcc
+        i = showWrapped (T.pack . occNameString) wrappedOcc
 
 docToLaTeX :: Doc DocName -> LaTeX
 docToLaTeX doc = markup latexMarkup doc Plain empty
