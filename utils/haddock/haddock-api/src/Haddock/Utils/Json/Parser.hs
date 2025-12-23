@@ -126,7 +126,7 @@ parseObject =
 
 parseNumber :: Parser Double
 parseNumber = tok $ do
-  s <- BSCL.unpack <$> Parsec.getInput
+  s <- T.unpack <$> Parsec.getInput
   case readSigned readFloat s of
-    [(n, s')] -> Parsec.setInput (BSCL.pack s') $> n
+    [(n, s')] -> Parsec.setInput (T.pack s') $> n
     _ -> mzero
