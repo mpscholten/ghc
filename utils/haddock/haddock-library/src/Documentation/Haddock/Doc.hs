@@ -66,17 +66,17 @@ docParagraph :: DocH mod id -> DocH mod id
 docParagraph (DocMonospaced p) =
   DocCodeBlock (docCodeBlock p)
 docParagraph (DocAppend (DocString s1) (DocMonospaced p))
-  | all isSpace s1 =
+  | T.all isSpace s1 =
       DocCodeBlock (docCodeBlock p)
 docParagraph
   ( DocAppend
       (DocString s1)
       (DocAppend (DocMonospaced p) (DocString s2))
     )
-    | all isSpace s1 && all isSpace s2 =
+    | T.all isSpace s1 && T.all isSpace s2 =
         DocCodeBlock (docCodeBlock p)
 docParagraph (DocAppend (DocMonospaced p) (DocString s2))
-  | all isSpace s2 =
+  | T.all isSpace s2 =
       DocCodeBlock (docCodeBlock p)
 docParagraph p =
   DocParagraph p
