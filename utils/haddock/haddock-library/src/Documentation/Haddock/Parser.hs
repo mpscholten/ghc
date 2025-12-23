@@ -601,7 +601,7 @@ since = do
       return (MetaSince pkg ver)
 
     package = combine <$> (Parsec.many1 (Parsec.letter <|> Parsec.char '_')) `Parsec.endBy1` (Parsec.char '-')
-    combine = concat . intersperse "-"
+    combine = T.pack . concat . intersperse "-"
 
 -- | Headers inside the comment denoted with @=@ signs, up to 6 levels
 -- deep.
@@ -635,7 +635,7 @@ textParagraphThatStartsWithMarkdownLink = docParagraph <$> (docAppend <$> markdo
     whitespace :: Parser (DocH mod a)
     whitespace = DocString <$> (f <$> takeHorizontalSpace <*> optional "\n")
       where
-        f :: Text -> Maybe Text -> String
+        f :: Text -> Maybe Text -> Text
         f xs (fromMaybe "" -> x)
           | T.null (xs <> x) = ""
           | otherwise = " "
