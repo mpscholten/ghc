@@ -81,6 +81,7 @@ import GHC.Utils.Outputable
 import GHC.Utils.Panic
 
 import GHC.Data.FastString
+import GHC.Utils.Encoding (utf8EncodeByteString)
 import GHC.Data.Maybe
 
 import Control.Monad
@@ -428,7 +429,7 @@ ifaceDeclNeverExportedRefs _ = []
 {-
 inheritedSigPvpWarning :: WarningTxt
 inheritedSigPvpWarning =
-    WarningTxt (noLoc NoSourceText) [noLoc (StringLiteral NoSourceText (fsLit msg))]
+    WarningTxt (noLoc NoSourceText) [noLoc (StringLiteral NoSourceText (utf8EncodeByteString msg))]
   where
     msg = "Inherited requirements from non-signature libraries (libraries " ++
           "with modules) should not be used, as this mode of use is not " ++
