@@ -226,11 +226,11 @@ outOfScope sDocContext ns x =
       when firstWarn $ do
         warn $
           "Warning: "
-            ++ prefix
-            ++ "'"
-            ++ a'
-            ++ "' is out of scope.\n"
-            ++ "    If you qualify the identifier, haddock can try to link it anyway."
+            <> T.pack prefix
+            <> "'"
+            <> a'
+            <> "' is out of scope.\n"
+            <> "    If you qualify the identifier, haddock can try to link it anyway."
         modify' (\env -> env{ifeOutOfScopeNames = Set.insert a' (ifeOutOfScopeNames env)})
 
       pure (monospaced a')
@@ -254,13 +254,13 @@ ambiguous sDocContext x names = do
       nameStr = showNsRdrName sDocContext x
       msg =
         "Warning: "
-          ++ nameStr
-          ++ " is ambiguous. It is defined\n"
-          ++ concatMap (\n -> "    * " ++ defnLoc n ++ "\n") names
-          ++ "    You may be able to disambiguate the identifier by qualifying it or\n"
-          ++ "    by specifying the type/value namespace explicitly.\n"
-          ++ "    Defaulting to the one defined "
-          ++ defnLoc dflt
+          <> nameStr
+          <> " is ambiguous. It is defined\n"
+          <> T.concat (map (\n -> "    * " <> T.pack (defnLoc n) <> "\n") names)
+          <> "    You may be able to disambiguate the identifier by qualifying it or\n"
+          <> "    by specifying the type/value namespace explicitly.\n"
+          <> "    Defaulting to the one defined "
+          <> T.pack (defnLoc dflt)
 
   -- TODO: Once we have a syntax for namespace qualification (#667) we may also
   -- want to emit a warning when an identifier is a data constructor for a type
@@ -281,8 +281,8 @@ ambiguous sDocContext x names = do
     defnLoc = Outputable.renderWithContext sDocContext . pprNameDefnLoc
 
 -- | Printable representation of a wrapped and namespaced name
-showNsRdrName :: SDocContext -> Wrap NsRdrName -> String
-showNsRdrName sDocContext = (\p i -> p ++ "'" ++ i ++ "'") <$> prefix <*> ident
+showNsRdrName :: SDocContext -> Wrap NsRdrName -> Text
+showNsRdrName sDocContext = (\p i -> T.pack p <> "'" <> T.pack i <> "'") <$> prefix <*> ident
   where
     ident = showWrapped (Outputable.renderWithContext sDocContext . ppr . rdrName)
     prefix = renderNs . namespace . unwrap
