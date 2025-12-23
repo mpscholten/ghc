@@ -189,8 +189,9 @@ specialChar = "_/<@\"&'`#[ "
 -- before capturing their characters.
 string' :: Parser (DocH mod a)
 string' =
-  DocString . T.pack
-    <$> ((:) <$> rawOrEscChar "" <*> many (rawOrEscChar "(["))
+  DocString . T.cons
+    <$> rawOrEscChar ""
+    <*> (T.pack <$> many (rawOrEscChar "(["))
     -- After the first character, stop for @\(@ or @\[@ math starters. (The
     -- first character won't start a valid math string because this parser
     -- should follow math parsers. But this parser is expected to accept at
@@ -277,21 +278,20 @@ moduleName = DocModule . flip ModLink Nothing <$> ("\"" *> moduleNameString <* "
 
 -- | A module name, optionally with an anchor
 moduleNameString :: Parser T.Text
-moduleNameString = T.pack <$> moduleNameString'
+moduleNameString = modid `maybeFollowedBy` anchor_
   where
-    moduleNameString' = modid `maybeFollowedBy` anchor_
-    modid = intercalate "." <$> conid `Parsec.sepBy1` "."
+    modid = T.intercalate "." <$> conid `Parsec.sepBy1` "."
     anchor_ =
-      (++)
-        <$> (Parsec.string "#" <|> Parsec.string "\\#")
-        <*> many (Parsec.satisfy (\c -> c /= '"' && not (isSpace c)))
+      T.append
+        <$> (string "#" <|> string "\\#")
+        <*> (T.pack <$> many (Parsec.satisfy (\c -> c /= '"' && not (isSpace c))))
 
-    maybeFollowedBy pre suf = (\x -> maybe x (x ++)) <$> pre <*> optional suf
-    conid :: Parser String
+    maybeFollowedBy pre suf = (\x -> maybe x (T.append x)) <$> pre <*> optional suf
+    conid :: Parser T.Text
     conid =
-      (:)
+      T.cons
         <$> Parsec.satisfy (\c -> isAlpha c && isUpper c)
-        <*> many conChar
+        <*> (T.pack <$> many conChar)
 
     conChar = Parsec.alphaNum <|> Parsec.char '_'
 
@@ -600,8 +600,7 @@ since = do
       ver <- decimal `Parsec.sepBy1` "."
       return (MetaSince pkg ver)
 
-    package = combine <$> (Parsec.many1 (Parsec.letter <|> Parsec.char '_')) `Parsec.endBy1` (Parsec.char '-')
-    combine = T.pack . concat . intersperse "-"
+    package = T.intercalate "-" <$> (T.pack <$> Parsec.many1 (Parsec.letter <|> Parsec.char '_')) `Parsec.endBy1` (Parsec.char '-')
 
 -- | Headers inside the comment denoted with @=@ signs, up to 6 levels
 -- deep.
