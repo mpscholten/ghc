@@ -174,7 +174,7 @@ parseParagraph = snd . parse p
 encodedChar :: Parser (DocH mod a)
 encodedChar = "&#" *> c <* ";"
   where
-    c = DocString . return . chr <$> num
+    c = DocString . T.singleton . chr <$> num
     num = hex <|> decimal
     hex = ("x" <|> "X") *> hexadecimal
 
@@ -189,7 +189,7 @@ specialChar = "_/<@\"&'`#[ "
 -- before capturing their characters.
 string' :: Parser (DocH mod a)
 string' =
-  DocString
+  DocString . T.pack
     <$> ((:) <$> rawOrEscChar "" <*> many (rawOrEscChar "(["))
     -- After the first character, stop for @\(@ or @\[@ math starters. (The
     -- first character won't start a valid math string because this parser
@@ -216,7 +216,7 @@ string' =
 -- This is done to skip over any special characters belonging to other
 -- elements but which were not deemed meaningful at their positions.
 skipSpecialChar :: Parser (DocH mod a)
-skipSpecialChar = DocString . return <$> Parsec.oneOf specialChar
+skipSpecialChar = DocString . T.singleton <$> Parsec.oneOf specialChar
 
 -- | Emphasis parser.
 --
@@ -276,9 +276,10 @@ moduleName :: Parser (DocH mod a)
 moduleName = DocModule . flip ModLink Nothing <$> ("\"" *> moduleNameString <* "\"")
 
 -- | A module name, optionally with an anchor
-moduleNameString :: Parser String
-moduleNameString = modid `maybeFollowedBy` anchor_
+moduleNameString :: Parser T.Text
+moduleNameString = T.pack <$> moduleNameString'
   where
+    moduleNameString' = modid `maybeFollowedBy` anchor_
     modid = intercalate "." <$> conid `Parsec.sepBy1` "."
     anchor_ =
       (++)
