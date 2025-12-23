@@ -128,7 +128,7 @@ createInterface1' flags unit_state dflags hie_file mod_iface ifaces inst_ifaces 
     pkg_name :: Maybe Package
     pkg_name =
       let
-        unpack (PackageName name) = unpackFS name
+        unpack (PackageName name) = T.pack (unpackFS name)
        in
         fmap unpack pkg_name_fs
 
@@ -159,7 +159,7 @@ createInterface1' flags unit_state dflags hie_file mod_iface ifaces inst_ifaces 
   mod_iface_docs <- case mi_docs mod_iface of
     Just docs -> pure docs
     Nothing -> do
-      warn $ showPpr dflags mdl ++ " has no docs in its .hi file"
+      warn $ T.pack (showPpr dflags mdl ++ " has no docs in its .hi file")
       pure emptyDocs
   -- Derive final options to use for haddocking this module
   doc_opts <- mkDocOpts (docs_haddock_opts mod_iface_docs) flags mdl
@@ -403,7 +403,7 @@ parseOption "not-home" = return (Just OptNotHome)
 parseOption "show-extensions" = return (Just OptShowExtensions)
 parseOption "print-explicit-runtime-reps" = return (Just OptPrintRuntimeRep)
 parseOption "redact-type-synonyms" = return (Just OptRedactTypeSyns)
-parseOption other = warn ("Unrecognised option: " ++ other) >> return Nothing
+parseOption other = warn (T.pack ("Unrecognised option: " ++ other)) >> return Nothing
 
 --------------------------------------------------------------------------------
 -- Declarations
@@ -472,7 +472,7 @@ mkExportItems
         DsiNamedChunkRef ref -> do
           case Map.lookup ref namedChunks of
             Nothing -> do
-              warn $ "Cannot find documentation for: $" ++ ref
+              warn $ T.pack ("Cannot find documentation for: $" ++ ref)
               pure []
             Just hsDoc' -> do
               doc <- processDocStringParas parserOpts sDocContext pkgName hsDoc'
