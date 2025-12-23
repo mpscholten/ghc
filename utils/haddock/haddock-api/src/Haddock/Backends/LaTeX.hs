@@ -1479,7 +1479,7 @@ latexMarkup =
     , markupOrderedList = \p v -> blockElem (enumeratedList (map (\(_, p') -> p' v empty) p))
     , markupDefList = \l v -> blockElem (descriptionList (map (\(a, b) -> (a v empty, b v empty)) l))
     , markupCodeBlock = \p _ -> blockElem (quote (verb (p Verb empty)))
-    , markupHyperlink = \(Hyperlink u l) v -> inlineElem (markupLink u (fmap (\x -> x v empty) l))
+    , markupHyperlink = \(Hyperlink u l) v -> inlineElem (markupLink (T.unpack u) (fmap (\x -> x v empty) l))
     , markupAName = \_ _ -> id -- TODO
     , markupProperty = \p _ -> blockElem (quote (verb (text (T.unpack p))))
     , markupExample = \e _ -> blockElem (quote (verb (text $ unlines $ map (T.unpack . exampleToString) e)))
@@ -1516,9 +1516,9 @@ latexMarkup =
     markupPic (Picture uri title) = parens (imageText title)
       where
         imageText Nothing = beg
-        imageText (Just t) = beg <> text " " <> text t
+        imageText (Just t) = beg <> text " " <> text (T.unpack t)
 
-        beg = text "image: " <> text uri
+        beg = text "image: " <> text (T.unpack uri)
 
     markupMathInline mathjax = text "\\(" <> text mathjax <> text "\\)"
 
@@ -1526,7 +1526,7 @@ latexMarkup =
 
     markupId v wrappedOcc =
       case v of
-        Verb -> text i
+        Verb -> text (T.unpack i)
         Mono -> text "\\haddockid" <> braces (text . latexMonoFilter $ i)
         Plain -> text "\\haddockid" <> braces (text . latexFilter $ i)
       where
