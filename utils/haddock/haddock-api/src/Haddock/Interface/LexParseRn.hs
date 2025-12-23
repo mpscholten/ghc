@@ -114,7 +114,7 @@ processModuleHeader mLanguage parserOpts sDocContext pkgName safety mayLang extS
       flags = EnumSet.toList extSet \\ languageExtensions mayLang
   return
     ( hmi
-        { hmi_safety = Just $ Outputable.renderWithContext sDocContext (Outputable.ppr safety)
+        { hmi_safety = Just $ T.pack $ Outputable.renderWithContext sDocContext (Outputable.ppr safety)
         , hmi_language = mLanguage
         , hmi_extensions = flags
         }
@@ -166,7 +166,7 @@ rename sDocContext renamer = rn
               Value -> valueNsChoices
               Type -> typeNsChoices
               None -> valueNsChoices <||> typeNsChoices
-        case renamer (Outputable.renderWithContext sDocContext (Outputable.ppr x)) choices of
+        case renamer (T.pack $ Outputable.renderWithContext sDocContext (Outputable.ppr x)) choices of
           [] -> case ns of
             Type -> outOfScope sDocContext ns (i $> setRdrNameSpace x tcName)
             _ -> outOfScope sDocContext ns (i $> x)
@@ -219,7 +219,7 @@ outOfScope sDocContext ns x =
 
     warnAndMonospace :: (MonadIO m, Outputable a) => Wrap a -> IfM m (DocH mod id)
     warnAndMonospace a = do
-      let a' = showWrapped (renderWithContext sDocContext . Outputable.ppr) a
+      let a' = showWrapped (T.pack . renderWithContext sDocContext . Outputable.ppr) a
 
       -- If we have already warned for this identifier, don't warn again
       firstWarn <- Set.notMember a' <$> gets ifeOutOfScopeNames
