@@ -54,6 +54,7 @@ import GHC.Unit.State
 import GHC.Utils.Binary
 import Haddock.Types
 import Text.ParserCombinators.ReadP (readP_to_S)
+import qualified Data.Text as T
 
 import Haddock.Options (Visibility (..))
 
@@ -438,38 +439,38 @@ instance Binary DocOption where
 
 instance Binary Example where
   put_ bh (Example expression result) = do
-    put_ bh expression
-    put_ bh result
+    put_ bh (T.unpack expression)
+    put_ bh (map T.unpack result)
   get bh = do
-    expression <- get bh
-    result <- get bh
+    expression <- T.pack <$> get bh
+    result <- map T.pack <$> get bh
     return (Example expression result)
 
 instance Binary a => Binary (Hyperlink a) where
   put_ bh (Hyperlink url label) = do
-    put_ bh url
+    put_ bh (T.unpack url)
     put_ bh label
   get bh = do
-    url <- get bh
+    url <- T.pack <$> get bh
     label <- get bh
     return (Hyperlink url label)
 
 instance Binary a => Binary (ModLink a) where
   put_ bh (ModLink m label) = do
-    put_ bh m
+    put_ bh (T.unpack m)
     put_ bh label
   get bh = do
-    m <- get bh
+    m <- T.pack <$> get bh
     label <- get bh
     return (ModLink m label)
 
 instance Binary Picture where
   put_ bh (Picture uri title) = do
-    put_ bh uri
-    put_ bh title
+    put_ bh (T.unpack uri)
+    put_ bh (fmap T.unpack title)
   get bh = do
-    uri <- get bh
-    title <- get bh
+    uri <- T.pack <$> get bh
+    title <- fmap T.pack <$> get bh
     return (Picture uri title)
 
 instance Binary a => Binary (Header a) where
@@ -697,23 +698,23 @@ instance (Binary mod, Binary id) => Binary (DocH mod id) where
 instance Binary name => Binary (HaddockModInfo name) where
   put_ bh hmi = do
     put_ bh (hmi_description hmi)
-    put_ bh (hmi_copyright hmi)
-    put_ bh (hmi_license hmi)
-    put_ bh (hmi_maintainer hmi)
-    put_ bh (hmi_stability hmi)
-    put_ bh (hmi_portability hmi)
-    put_ bh (hmi_safety hmi)
+    put_ bh (fmap T.unpack $ hmi_copyright hmi)
+    put_ bh (fmap T.unpack $ hmi_license hmi)
+    put_ bh (fmap T.unpack $ hmi_maintainer hmi)
+    put_ bh (fmap T.unpack $ hmi_stability hmi)
+    put_ bh (fmap T.unpack $ hmi_portability hmi)
+    put_ bh (fmap T.unpack $ hmi_safety hmi)
     put_ bh (fromEnum <$> hmi_language hmi)
     put_ bh (map fromEnum $ hmi_extensions hmi)
 
   get bh = do
     descr <- get bh
-    copyr <- get bh
-    licen <- get bh
-    maint <- get bh
-    stabi <- get bh
-    porta <- get bh
-    safet <- get bh
+    copyr <- fmap T.pack <$> get bh
+    licen <- fmap T.pack <$> get bh
+    maint <- fmap T.pack <$> get bh
+    stabi <- fmap T.pack <$> get bh
+    porta <- fmap T.pack <$> get bh
+    safet <- fmap T.pack <$> get bh
     langu <- fmap toEnum <$> get bh
     exten <- map toEnum <$> get bh
     return (HaddockModInfo descr copyr licen maint stabi porta safet langu exten)
