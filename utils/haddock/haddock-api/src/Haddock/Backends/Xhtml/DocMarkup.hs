@@ -24,6 +24,7 @@ module Haddock.Backends.Xhtml.DocMarkup
 
 import Data.List (intersperse)
 import Data.Maybe (fromMaybe)
+import qualified Data.Text as T
 import GHC
 import GHC.Types.Name
 import Text.XHtml hiding (name, p, quote)
@@ -55,13 +56,13 @@ parHtmlMarkup qual insertAnchors ppId =
     , markupIdentifier = thecode . ppId insertAnchors
     , markupIdentifierUnchecked = thecode . ppUncheckedLink qual
     , markupModule = \(ModLink m lbl) ->
-        let (mdl, ref) = break (== '#') m
+        let (mdl, ref) = T.break (== '#') m
             -- Accommodate for old style
             -- foo\#bar anchors
-            mdl' = case reverse mdl of
-              '\\' : _ -> init mdl
+            mdl' = case T.unpack (T.reverse mdl) of
+              '\\' : _ -> T.init mdl
               _ -> mdl
-         in ppModuleRef lbl (mkModuleName mdl') (LText.pack ref)
+         in ppModuleRef lbl (mkModuleName (T.unpack mdl')) (LText.pack (T.unpack ref))
     , markupWarning = thediv ! [theclass "warning"]
     , markupEmphasis = emphasize
     , markupBold = strong
@@ -74,16 +75,16 @@ parHtmlMarkup qual insertAnchors ppId =
         if insertAnchors
           then
             anchor
-              ! [href (LText.pack url)]
+              ! [href (LText.pack (T.unpack url))]
               << fromMaybe (toHtml url) mLabel
           else fromMaybe (toHtml url) mLabel
     , markupAName = \aname ->
         if insertAnchors
-          then namedAnchor (LText.pack aname) << ("" :: LText.Text)
+          then namedAnchor (LText.pack (T.unpack aname)) << ("" :: LText.Text)
           else noHtml
-    , markupPic = \(Picture uri t) -> image ! ([src (LText.pack uri)] ++ fromMaybe [] (return . title <$> (LText.pack <$> t)))
-    , markupMathInline = \mathjax -> thespan ! [theclass "mathjax"] << toHtml ("\\(" ++ mathjax ++ "\\)")
-    , markupMathDisplay = \mathjax -> thespan ! [theclass "mathjax"] << toHtml ("\\[" ++ mathjax ++ "\\]")
+    , markupPic = \(Picture uri t) -> image ! ([src (LText.pack (T.unpack uri))] ++ fromMaybe [] (return . title <$> (LText.pack . T.unpack <$> t)))
+    , markupMathInline = \mathjax -> thespan ! [theclass "mathjax"] << toHtml (T.unpack ("\\(" <> mathjax <> "\\)"))
+    , markupMathDisplay = \mathjax -> thespan ! [theclass "mathjax"] << toHtml (T.unpack ("\\[" <> mathjax <> "\\]"))
     , markupProperty = pre . toHtml
     , markupExample = examplesToHtml
     , markupHeader = \(Header l t) -> makeHeader l t
