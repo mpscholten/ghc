@@ -47,6 +47,7 @@ import GHC.Hs.Extension
 
 import GHC.Types.Literal   ( litIsLifted ) --, mkLitInt ) -- temporarily commented out. See #8326
 import GHC.Types.SourceText
+import GHC.Utils.Encoding (utf8EncodeByteString)
 import GHC.Types.Id
 import GHC.Types.Id.Make   ( seqId )
 import GHC.Types.Id.Info
@@ -674,7 +675,7 @@ mkCastWrapperInlinePrag prag = prag
     wrap_act | isNeverActive fn_act = activateDuringFinal
              | otherwise            = fn_act
     fn_act  = inlinePragmaActivation prag
-    src_txt = SourceText $ fsLit "{-# INLINE"
+    src_txt = SourceText $ utf8EncodeByteString "{-# INLINE"
 
 {- *********************************************************************
 *                                                                      *
