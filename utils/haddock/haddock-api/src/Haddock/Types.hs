@@ -64,7 +64,7 @@ import GHC.Types.Name.Occurrence
 import GHC.Types.Name.Reader (RdrName (..))
 import GHC.Types.SrcLoc (srcSpanToRealSrcSpan)
 import GHC.Types.Var (Specificity)
-import GHC.Utils.Outputable
+import GHC.Utils.Outputable hiding ((<>))
 
 import Documentation.Haddock.Types
 
