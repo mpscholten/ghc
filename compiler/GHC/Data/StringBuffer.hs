@@ -42,6 +42,7 @@ module GHC.Data.StringBuffer
         -- * Conversion
         lexemeToString,
         lexemeToFastString,
+        lexemeToByteString,
         decodePrevNChars,
 
          -- * Parsing integers
@@ -387,6 +388,16 @@ lexemeToFastString (StringBuffer buf _ cur) len =
    inlinePerformIO $
      unsafeWithForeignPtr buf $ \ptr ->
        return $! mkFastStringBytes (ptr `plusPtr` cur) len
+
+-- | Return the UTF8-encoded bytes of the first @n@ bytes of the buffer
+lexemeToByteString :: StringBuffer
+                   -> Int               -- ^ @n@, the number of bytes
+                   -> BS.ByteString
+lexemeToByteString _ 0 = BS.empty
+lexemeToByteString (StringBuffer buf _ cur) len =
+   inlinePerformIO $
+     unsafeWithForeignPtr buf $ \ptr ->
+       BS.packCStringLen (ptr `plusPtr` cur, len)
 
 -- | Return the previous @n@ characters (or fewer if we are less than @n@
 -- characters into the buffer.

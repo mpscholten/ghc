@@ -1188,7 +1188,7 @@ skip_one_varid f span buf len _buf2
 
 skip_one_varid_src :: (SourceText -> FastString -> Token) -> Action
 skip_one_varid_src f span buf len _buf2
-  = return (L span $! f (SourceText $ lexemeToFastString (stepOn buf) (len-1))
+  = return (L span $! f (SourceText $ lexemeToByteString (stepOn buf) (len-1))
                         (lexemeToFastString (stepOn buf) (len-1)))
 
 skip_two_varid :: (FastString -> Token) -> Action
@@ -2166,7 +2166,7 @@ tok_string span buf len _buf2 = do
     else
       pure $ L span (ITstring src (mkFastString s))
   where
-    src = SourceText $ lexemeToFastString buf len
+    src = SourceText $ lexemeToByteString buf len
     endsInHash = currentChar (offsetBytes (len - 1) buf) == '#'
 
 {- Note [Lexing multiline strings]
@@ -2199,7 +2199,7 @@ tok_string_multi startSpan startBuf _len _buf2 = do
   -- build the values pertaining to the entire multiline string, including delimiters
   let span = mkPsSpan startLoc endLoc
   let len = byteDiff startBuf endBuf
-  let src = SourceText $ lexemeToFastString startBuf len
+  let src = SourceText $ lexemeToByteString startBuf len
 
   -- load the content of the multiline string
   let contentLen = byteDiff contentStartBuf contentEndBuf
@@ -2275,7 +2275,7 @@ tok_char span buf len _buf2 = do
       then ITprimchar src c
       else ITchar src c
   where
-    src = SourceText $ lexemeToFastString buf len
+    src = SourceText $ lexemeToByteString buf len
     endsInHash = currentChar (offsetBytes (len - 1) buf) == '#'
 
 
