@@ -40,7 +40,8 @@ import qualified Data.List as List
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Maybe (fromMaybe, mapMaybe)
 import qualified Data.Set as Set
-import GHC hiding (HsTypeGhcPsExt (..))
+import qualified Data.Text as T
+import GHC hiding (HsTypeGhcPsExt (...))
 import GHC.Builtin.Types (liftedRepTy)
 import GHC.Core.TyCo.Rep (Type (..))
 import GHC.Core.Type (binderVar, isRuntimeRepVar)
@@ -70,6 +71,12 @@ import Haddock.Types (DocName, DocNameI, ExportInfo, XRecCond, HsTypeDocNameIExt
 
 moduleString :: Module -> String
 moduleString = moduleNameString . moduleName
+
+moduleText :: Module -> T.Text
+moduleText = T.pack . moduleString
+
+getOccText :: Name -> T.Text
+getOccText = T.pack . getOccString
 
 isNameSym :: Name -> Bool
 isNameSym = isSymOcc . nameOccName

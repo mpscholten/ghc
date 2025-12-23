@@ -656,8 +656,8 @@ ppJsonIndex odir maybe_source_url maybe_wiki_url unicode pkg qual_opt ifaces ins
           Just
             JsonIndexEntry
               { jieHtmlFragment = showHtmlFragment item_html
-              , jieName = Text.pack (unwords (map getOccString names))
-              , jieModule = Text.pack (moduleString mdl)
+              , jieName = T.unwords (map getOccText names)
+              , jieModule = moduleText mdl
               , jieLink = LText.toStrict $ fromMaybe "" (listToMaybe (map (nameLink mdl) names))
               }
       | otherwise = Nothing

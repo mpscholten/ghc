@@ -43,6 +43,7 @@ import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes, isJust, mapMaybe, maybeToList)
 import Data.Traversable (for)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as Text.Encoding
 import GHC hiding (lookupName)
 import GHC.Builtin.Names
 import GHC.Builtin.Types.Prim
@@ -363,8 +364,11 @@ parseWarning parserOpts sDocContext w = case w of
     fsToDoc :: FastString -> HsDocString
     fsToDoc fs = GeneratedDocString $ HsDocStringChunk (bytesFS fs)
 
+    fastStringToText :: FastString -> T.Text
+    fastStringToText = Text.Encoding.decodeUtf8 . bytesFS
+
     format x bs =
-      DocWarning . DocParagraph . DocAppend (DocString (T.pack (unpackFS x)))
+      DocWarning . DocParagraph . DocAppend (DocString (fastStringToText x))
         <$> foldrM (\doc rest -> docAppend <$> processDocString parserOpts sDocContext doc <*> pure rest) DocEmpty bs
 
 -------------------------------------------------------------------------------
