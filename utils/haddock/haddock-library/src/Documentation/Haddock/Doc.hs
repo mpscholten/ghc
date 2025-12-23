@@ -93,7 +93,7 @@ docParagraph p =
 --
 docCodeBlock :: DocH mod id -> DocH mod id
 docCodeBlock (DocString s) =
-  DocString (reverse $ dropWhile (`elem` " \t") $ reverse s)
+  DocString (T.dropWhileEnd (\c -> c == ' ' || c == '\t') s)
 docCodeBlock (DocAppend l r) =
   DocAppend l (docCodeBlock r)
 docCodeBlock d = d
