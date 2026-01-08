@@ -192,14 +192,14 @@ instance Outputable (WarningTxt (GhcPass pass)) where
     ppr (WarningTxt lsrc mcat ws)
       = case lsrc of
             NoSourceText   -> pp_ws ws
-            SourceText src -> ftext src <+> ctg_doc <+> pp_ws ws <+> text "#-}"
+            SourceText src -> text (utf8DecodeByteString src) <+> ctg_doc <+> pp_ws ws <+> text "#-}"
         where
           ctg_doc = maybe empty (\ctg -> ppr ctg) mcat
 
     ppr (DeprecatedTxt lsrc ds)
       = case lsrc of
           NoSourceText   -> pp_ws ds
-          SourceText src -> ftext src <+> pp_ws ds <+> text "#-}"
+          SourceText src -> text (utf8DecodeByteString src) <+> pp_ws ds <+> text "#-}"
 
 pp_ws :: [LocatedE (WithHsDocIdentifiers StringLiteral pass)] -> SDoc
 pp_ws [l] = ppr $ unLoc l

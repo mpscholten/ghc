@@ -911,7 +911,7 @@ ppr_expr (HsOverLabel s l) = case ghcPass @p of
     where helper s =
             char '#' <> case s of
                           NoSourceText -> ppr l
-                          SourceText src -> ftext src
+                          SourceText src -> bstext src
 ppr_expr (HsPragE _ prag e)  = sep [ppr prag, ppr_lexpr e]
 
 ppr_expr (OpApp _ e1 op e2)
@@ -1332,7 +1332,7 @@ instance Outputable (HsPragE (GhcPass p)) where
     pprWithSourceText st (text "{-# SCC")
      -- no doublequotes if stl empty, for the case where the SCC was written
      -- without quotes.
-    <+> pprWithSourceText stl (ftext lbl) <+> text "#-}"
+    <+> pprWithSourceText stl (bstext lbl) <+> text "#-}"
 
 
 {- *********************************************************************

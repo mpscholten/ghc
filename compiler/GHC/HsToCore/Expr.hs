@@ -76,6 +76,7 @@ import GHC.Utils.Misc
 import GHC.Utils.Outputable as Outputable
 import GHC.Utils.Panic
 import Control.Monad
+import GHC.Data.FastString (mkFastStringByteString)
 
 {-
 ************************************************************************

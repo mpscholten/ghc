@@ -30,7 +30,7 @@ module GHC.Utils.Outputable (
         pprWithBars,
         spaceIfSingleQuote,
         isEmpty, nest,
-        ptext,
+        ptext, bstext,
         int, intWithCommas, integer, natural, word64, word, float, double, rational, doublePrec,
         parens, cparen, brackets, braces, quotes, quote, quoteIfPunsEnabled,
         doubleQuotes, angleBrackets,
@@ -160,6 +160,7 @@ import GHC.Fingerprint
 import GHC.Show         ( showMultiLineString )
 import GHC.Utils.Exception
 import GHC.Exts (oneShot)
+import GHC.Utils.Encoding (utf8DecodeByteString)
 
 {-
 ************************************************************************
@@ -1070,6 +1071,9 @@ instance Outputable FastString where
     ppr fs = ftext fs           -- Prints an unadorned string,
                                 -- no double quotes or anything
 
+instance Outputable ByteString where
+    ppr bs = text (utf8DecodeByteString bs)
+
 deriving newtype instance Outputable NonDetFastString
 deriving newtype instance Outputable LexicalFastString
 
@@ -1875,6 +1879,9 @@ class IsOutput doc => IsLine doc where
   -- which type the result is instantiated to. This should generally be avoided;
   -- see Note [dualLine and dualDoc] for details.
   dualLine :: SDoc -> HLine -> doc
+  
+  bstext :: ByteString -> doc
+  bstext s = text (utf8DecodeByteString s)
 
 
 -- | A class of types that represent a multiline document, with support for

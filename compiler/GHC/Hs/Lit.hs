@@ -21,7 +21,6 @@ import GHC.Prelude
 
 import {-# SOURCE #-} GHC.Hs.Expr( pprExpr )
 
-import GHC.Data.FastString (unpackFS)
 import GHC.Types.Basic (PprPrec(..), topPrec )
 import GHC.Core.Ppr ( {- instance OutputableBndr TyVar -} )
 import GHC.Types.SourceText
@@ -33,6 +32,7 @@ import GHC.Hs.Extension
 import Language.Haskell.Syntax.Expr ( HsExpr )
 import Language.Haskell.Syntax.Extension
 import Language.Haskell.Syntax.Lit
+import GHC.Utils.Encoding (utf8DecodeByteString)
 
 {-
 ************************************************************************
@@ -216,7 +216,7 @@ instance IsPass p => Outputable (HsLit (GhcPass p)) where
     ppr (HsMultilineString st s) =
       case st of
         NoSourceText -> pprHsString s
-        SourceText src -> vcat $ map text $ split '\n' (unpackFS src)
+        SourceText src -> vcat $ map text $ split '\n' (utf8DecodeByteString src)
     ppr (HsStringPrim st s) = pprWithSourceText st (pprHsBytes s)
     ppr (HsInt _ i)
       = pprWithSourceText (il_text i) (integer (il_value i))

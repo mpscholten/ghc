@@ -14,6 +14,7 @@ import GHC.Types.SourceText
 import GHC.Types.SrcLoc ( unLoc )
 
 import GHC.Unit.Module.Warnings
+import GHC.Data.FastString (mkFastStringByteString)
 
 toIfaceWarnings :: Warnings GhcRn -> IfaceWarnings
 toIfaceWarnings (WarnAll txt) = IfWarnAll (toIfaceWarningTxt txt)
@@ -30,5 +31,5 @@ toIfaceStringLiteralWithNames :: WithHsDocIdentifiers StringLiteral GhcRn -> (If
 toIfaceStringLiteralWithNames (WithHsDocIdentifiers src names) = (toIfaceStringLiteral src, map unLoc names)
 
 toIfaceStringLiteral :: StringLiteral -> IfaceStringLiteral
-toIfaceStringLiteral (StringLiteral sl fs _) = IfStringLiteral sl fs
+toIfaceStringLiteral (StringLiteral sl fs _) = IfStringLiteral sl (mkFastStringByteString fs)
 
