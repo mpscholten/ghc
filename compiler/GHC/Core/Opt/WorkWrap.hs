@@ -20,7 +20,6 @@ import GHC.Core.Type
 import GHC.Core.Opt.WorkWrap.Utils
 import GHC.Core.SimpleOpt
 
-import GHC.Data.FastString
 
 import GHC.Hs.Extension (GhcPass, GhcTc)
 

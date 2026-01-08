@@ -174,7 +174,7 @@ showAstData bs ba a0 = blankLine $$ showAstData' a0
               _            -> parens $ text "NoSourceText"
             sourceText (SourceText src) = case bs of
               BlankSrcSpan     -> parens $ text "SourceText" <+> text "blanked"
-              _                -> parens $ text "SourceText" <+> ftext src
+              _                -> parens $ text "SourceText" <+> bstext src
 
             epaLocation :: EpaLocation -> SDoc
             epaLocation (EpaSpan s) = parens $ text "EpaSpan" <+> srcSpan s

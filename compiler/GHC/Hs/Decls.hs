@@ -1073,7 +1073,7 @@ ppOverlapPragma mb =
     Just (L _ (NonCanonical s)) -> maybe_stext s "{-# INCOHERENT #-}" -- No surface syntax for NONCANONICAL yet
   where
     maybe_stext NoSourceText     alt = text alt
-    maybe_stext (SourceText src) _   = ftext src <+> text "#-}"
+    maybe_stext (SourceText src) _   = bstext src <+> text "#-}"
 
 
 instance (OutputableBndrId p) => Outputable (InstDecl (GhcPass p)) where
@@ -1387,7 +1387,7 @@ type instance XXWarnDecl    (GhcPass _) = DataConCantHappen
 instance OutputableBndrId p
         => Outputable (WarnDecls (GhcPass p)) where
     ppr (Warnings ext decls)
-      = ftext src <+> vcat (punctuate semi (map ppr decls)) <+> text "#-}"
+      = bstext src <+> vcat (punctuate semi (map ppr decls)) <+> text "#-}"
       where src = case ghcPass @p of
               GhcPs | (_, SourceText src) <- ext -> src
               GhcRn | SourceText src <- ext -> src

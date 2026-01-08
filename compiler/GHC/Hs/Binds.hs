@@ -52,6 +52,7 @@ import GHC.Utils.Panic
 import Data.Function
 import Data.List (sortBy)
 import Data.Data (Data)
+import GHC.Utils.Encoding (utf8DecodeByteString)
 
 {-
 ************************************************************************
@@ -845,7 +846,7 @@ ppr_sig (InlineSig _ var inl)
   = ppr_pfx <+> pprInline inl <+> pprPrefixOcc (unLoc var) <+> text "#-}"
     where
       ppr_pfx = case inlinePragmaSource inl of
-        SourceText src -> ftext src
+        SourceText src -> text (utf8DecodeByteString src)
         NoSourceText   -> text "{-#" <+> inlinePragmaName (inl_inline inl)
 
 ppr_sig (SpecInstSig (_, src) ty)
@@ -924,7 +925,7 @@ pragBrackets doc = text "{-#" <+> doc <+> text "#-}"
 -- | Using SourceText in case the pragma was spelled differently or used mixed
 -- case
 pragSrcBrackets :: SourceText -> String -> SDoc -> SDoc
-pragSrcBrackets (SourceText src) _   doc = ftext src <+> doc <+> text "#-}"
+pragSrcBrackets (SourceText src) _   doc = text (utf8DecodeByteString src) <+> doc <+> text "#-}"
 pragSrcBrackets NoSourceText     alt doc = text alt <+> doc <+> text "#-}"
 
 pprVarSig :: (OutputableBndr id) => [id] -> SDoc -> SDoc

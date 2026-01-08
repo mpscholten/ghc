@@ -137,7 +137,7 @@ lexStringLiteral :: P (LocatedN RdrName) -- ^ A precise identifier parser
 lexStringLiteral identParser (L l sl@(StringLiteral _ fs _))
   = L l (WithHsDocIdentifiers sl idents)
   where
-    bs = bytesFS fs
+    bs = fs
 
     idents = mapMaybe (uncurry (validateIdentWith identParser)) plausibleIdents
 

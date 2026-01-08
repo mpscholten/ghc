@@ -87,6 +87,7 @@ import GHC.Data.List.SetOps
 
 import Control.Applicative ((<|>))
 import Data.Maybe
+import GHC.Data.FastString (bytesFS)
 
 {-
 ************************************************************************
@@ -272,7 +273,7 @@ ghcPrimWarns = WarnSome
   []
   where
     mk_txt msg =
-      DeprecatedTxt NoSourceText [noLocA $ WithHsDocIdentifiers (StringLiteral NoSourceText msg Nothing) []]
+      DeprecatedTxt NoSourceText [noLocA $ WithHsDocIdentifiers (StringLiteral NoSourceText (bytesFS msg) Nothing) []]
     mk_decl_dep (occ, msg) = (occ, mk_txt msg)
 
 ghcPrimFixities :: [(OccName,Fixity)]

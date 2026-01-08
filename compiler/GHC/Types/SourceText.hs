@@ -29,7 +29,6 @@ where
 
 import GHC.Prelude
 
-import GHC.Data.FastString
 import GHC.Utils.Encoding
 
 import GHC.Utils.Outputable

@@ -834,7 +834,7 @@ cvtForD (ImportF callconv safety from nm ty) =
           -- and are inserted verbatim, analogous to mkImport in GHC.Parser.PostProcess
           |  callconv == TH.Prim || callconv == TH.JavaScript
           -> mk_imp (CImport (L l $ quotedSourceText from) (L l (cvt_conv callconv)) (L l safety') Nothing
-                             (CFunction (StaticTarget (SourceText fromtxt)
+                             (CFunction (StaticTarget (SourceText fromtxtbs)
                                                       fromtxt Nothing
                                                       True)))
           |  Just impspec <- parseCImport (L l (cvt_conv callconv)) (L l safety')
@@ -845,6 +845,7 @@ cvtForD (ImportF callconv safety from nm ty) =
           -> failWith $ InvalidCCallImpent from }
   where
     fromtxt = mkFastString from
+    fromtxtbs = utf8EncodeByteString from
     mk_imp impspec
       = do { nm' <- vNameN nm
            ; ty' <- cvtSigType ty
@@ -864,7 +865,8 @@ cvtForD (ExportF callconv as nm ty)
         ; ls <- getL
         ; let l = l2l ls
         ; let astxt = mkFastString as
-        ; let e = CExport (L l (SourceText astxt)) (L l (CExportStatic (SourceText astxt)
+        ; let astxtbs = utf8EncodeByteString as
+        ; let e = CExport (L l (SourceText astxtbs)) (L l (CExportStatic (SourceText astxtbs)
                                                 astxt
                                                 (cvt_conv callconv)))
         ; return $ ForeignExport { fd_e_ext = noAnn

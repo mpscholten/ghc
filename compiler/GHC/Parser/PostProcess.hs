@@ -179,6 +179,8 @@ import Data.Char
 import Data.Data       ( dataTypeOf, fromConstr, dataTypeConstrs )
 import Data.Kind       ( Type )
 import Data.List.NonEmpty ( NonEmpty (..) )
+import GHC.Utils.Encoding.UTF8 (utf8DecodeByteString)
+import qualified Data.ByteString as BS
 
 {- **********************************************************************
 
@@ -3122,7 +3124,7 @@ mkImport cconv safety (L loc (StringLiteral esrc entity _), v, ty) (timport, td)
     -- If 'cid' is missing, the function name 'v' is used instead as symbol
     -- name (cf section 8.5.1 in Haskell 2010 report).
     mkCImport = do
-      let e = unpackFS entity
+      let e = utf8DecodeByteString entity
       case parseCImport (reLoc cconv) (reLoc safety) (mkExtName (unLoc v)) e (L loc esrc) of
         Nothing         -> addFatalError $ mkPlainErrorMsgEnvelope loc $
                              PsErrMalformedEntityString
@@ -3135,9 +3137,9 @@ mkImport cconv safety (L loc (StringLiteral esrc entity _), v, ty) (timport, td)
     -- the entity string. If it is missing, we use the function name instead.
     mkOtherImport = returnSpec importSpec
       where
-        entity'    = if nullFS entity
+        entity'    = if BS.null entity
                         then mkExtName (unLoc v)
-                        else entity
+                        else mkFastStringByteString entity
         funcTarget = CFunction (StaticTarget esrc entity' Nothing True)
         importSpec = CImport (L (l2l loc) esrc) (reLoc cconv) (reLoc safety) Nothing funcTarget
 
@@ -3170,7 +3172,7 @@ parseCImport cconv safety nm str sourceText =
               (do h <- munch1 hdr_char
                   skipSpaces
                   let src = mkFastString h
-                  mk (Just (Header (SourceText src) src))
+                  mk (Just (Header (SourceText (bytesFS src)) src))
                       <$> cimp nm))
          ]
        skipSpaces
@@ -3221,8 +3223,8 @@ mkExport (L lc cconv) (L le (StringLiteral esrc entity _), v, ty) (texport, td)
    ForeignExport { fd_e_ext = (tforeign, texport, td), fd_name = v, fd_sig_ty = ty
                  , fd_fe = CExport (L (l2l le) esrc) (L (l2l lc) (CExportStatic esrc entity' cconv)) }
   where
-    entity' | nullFS entity = mkExtName (unLoc v)
-            | otherwise     = entity
+    entity' | BS.null entity = mkExtName (unLoc v)
+            | otherwise     = mkFastStringByteString entity
 
 -- Supplying the ext_name in a foreign decl is optional; if it
 -- isn't there, the Haskell name is assumed. Note that no transformation
@@ -3693,7 +3695,7 @@ mkLHsOpTy prom x op y =
   in L (noAnnSrcSpan loc) (mkHsOpTy prom x op y)
 
 mkMultExpr :: EpToken "%" -> LHsExpr GhcPs -> TokRarrow -> HsMultAnnOf (LHsExpr GhcPs) GhcPs
-mkMultExpr pct t@(L _ (HsOverLit _ (OverLit _ (HsIntegral (IL (SourceText (unpackFS -> "1")) _ 1))))) arr
+mkMultExpr pct t@(L _ (HsOverLit _ (OverLit _ (HsIntegral (IL (SourceText (utf8DecodeByteString -> "1")) _ 1))))) arr
   -- See #18888 for the use of (SourceText "1") above
   = HsLinearAnn (EpPct1 pct1 (EpArrow arr))
   where
@@ -3703,7 +3705,7 @@ mkMultExpr pct t@(L _ (HsOverLit _ (OverLit _ (HsIntegral (IL (SourceText (unpac
 mkMultExpr pct t arr = HsExplicitMult (pct, EpArrow arr) t
 
 mkMultAnn :: EpToken "%" -> LHsType GhcPs -> EpArrowOrColon -> HsMultAnn GhcPs
-mkMultAnn pct t@(L _ (HsTyLit _ (HsNumTy (SourceText (unpackFS -> "1")) 1))) ep
+mkMultAnn pct t@(L _ (HsTyLit _ (HsNumTy (SourceText (utf8DecodeByteString -> "1")) 1))) ep
   -- See #18888 for the use of (SourceText "1") above
   = HsLinearAnn (EpPct1 pct1 ep)
   where
