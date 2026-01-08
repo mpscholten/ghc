@@ -104,6 +104,7 @@ import GHC.Prelude
 
 import GHC.ForeignSrcLang
 import GHC.Data.FastString
+import GHC.Utils.Encoding (utf8EncodeByteString)
 import GHC.Utils.Outputable
 import GHC.Utils.Panic
 import GHC.Utils.Binary
