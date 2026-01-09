@@ -44,6 +44,7 @@ import GHC
 import GHC.Base (NonEmpty(..))
 import qualified GHC.Data.BooleanFormula as BF
 import GHC.Data.FastString
+import GHC.Utils.Encoding (utf8DecodeByteString)
 import qualified GHC.Data.Strict as Strict
 import GHC.TypeLits
 import GHC.Types.Basic hiding (EP)
@@ -672,11 +673,11 @@ class (Typeable a) => ExactPrint a where
 
 printSourceText :: (Monad m, Monoid w) => SourceText -> String -> EP w m ()
 printSourceText (NoSourceText) txt   =  printStringAdvance txt >> return ()
-printSourceText (SourceText   txt) _ =  printStringAdvance (unpackFS txt) >> return ()
+printSourceText (SourceText   txt) _ =  printStringAdvance (utf8DecodeByteString txt) >> return ()
 
 printSourceTextAA :: (Monad m, Monoid w) => SourceText -> String -> EP w m ()
 printSourceTextAA (NoSourceText) txt   = printStringAdvanceA  txt >> return ()
-printSourceTextAA (SourceText   txt) _ = printStringAdvanceA  (unpackFS txt) >> return ()
+printSourceTextAA (SourceText   txt) _ = printStringAdvanceA  (utf8DecodeByteString txt) >> return ()
 
 -- ---------------------------------------------------------------------
 
@@ -761,7 +762,7 @@ printStringAtAAC capture (EpaDelta ss d cs) s = do
 
 markExternalSourceTextE :: (Monad m, Monoid w) => EpaLocation -> SourceText -> String -> EP w m EpaLocation
 markExternalSourceTextE l NoSourceText txt   = printStringAtAA l txt
-markExternalSourceTextE l (SourceText txt) _ = printStringAtAA l (unpackFS txt)
+markExternalSourceTextE l (SourceText txt) _ = printStringAtAA l (utf8DecodeByteString txt)
 
 -- ---------------------------------------------------------------------
 
@@ -839,12 +840,12 @@ markEpUniToken (EpUniTok aa isUnicode)  = do
 markAnnOpen' :: (Monad m, Monoid w)
   => Maybe EpaLocation -> SourceText -> String -> EP w m (Maybe EpaLocation)
 markAnnOpen' ms NoSourceText txt   = printStringAtMLoc' ms txt
-markAnnOpen' ms (SourceText txt) _ = printStringAtMLoc' ms $ unpackFS txt
+markAnnOpen' ms (SourceText txt) _ = printStringAtMLoc' ms $ utf8DecodeByteString txt
 
 markAnnOpen'' :: (Monad m, Monoid w)
   => EpaLocation -> SourceText -> String -> EP w m EpaLocation
 markAnnOpen'' el NoSourceText txt   = printStringAtAA el txt
-markAnnOpen'' el (SourceText txt) _ = printStringAtAA el $ unpackFS txt
+markAnnOpen'' el (SourceText txt) _ = printStringAtAA el $ utf8DecodeByteString txt
 
 -- ---------------------------------------------------------------------
 
@@ -1606,7 +1607,7 @@ instance ExactPrint (SourceText, WarningCategory) where
   exact (st, WarningCategory wc) = do
       case st of
           NoSourceText -> printStringAdvance $ "\"" ++ (unpackFS wc) ++ "\""
-          SourceText src -> printStringAdvance $ (unpackFS src)
+          SourceText src -> printStringAdvance $ (utf8DecodeByteString src)
       return (st, WarningCategory wc)
 
 -- ---------------------------------------------------------------------
@@ -1971,7 +1972,7 @@ instance ExactPrint StringLiteral where
   setAnnotationAnchor a _ _ _ = a
 
   exact (StringLiteral src fs mcomma) = do
-    printSourceTextAA src (show (unpackFS fs))
+    printSourceTextAA src (show (utf8DecodeByteString fs))
     mcomma' <- mapM (\r -> printStringAtNC r ",") mcomma
     return (StringLiteral src fs mcomma')
 
@@ -1994,7 +1995,7 @@ instance ExactPrint (RuleDecls GhcPs) where
     o' <-
       case src of
         NoSourceText      -> printStringAtAA o "{-# RULES"
-        SourceText srcTxt -> printStringAtAA o (unpackFS srcTxt)
+        SourceText srcTxt -> printStringAtAA o (utf8DecodeByteString srcTxt)
     rules' <- markAnnotated rules
     c' <- markEpToken c
     return (HsRules ((o',c'),src) rules')
@@ -2862,7 +2863,7 @@ instance ExactPrint (HsExpr GhcPs) where
     printStringAdvanceA "#" >> return ()
     case src of
       NoSourceText   -> printStringAdvanceA (unpackFS l)  >> return ()
-      SourceText txt -> printStringAdvanceA (unpackFS txt) >> return ()
+      SourceText txt -> printStringAdvanceA (utf8DecodeByteString txt) >> return ()
     return x
 
   exact x@(HsIPVar _ (HsIPName n))
@@ -2874,7 +2875,7 @@ instance ExactPrint (HsExpr GhcPs) where
                 HsFractional (FL { fl_text = src }) -> src
                 HsIsString src _          -> src
     case str of
-      SourceText s -> printStringAdvance (unpackFS s) >> return ()
+      SourceText s -> printStringAdvance (utf8DecodeByteString s) >> return ()
       NoSourceText -> withPpr x >> return ()
     return x
 
@@ -3191,7 +3192,7 @@ instance ExactPrint (HsPragE GhcPs) where
 
   exact (HsPragSCC (AnnPragma o c s l1 l2 t m,st) sl) = do
     o' <- markAnnOpen'' o st  "{-# SCC"
-    l1' <- printStringAtAA l1 (sourceTextToString (sl_st sl) (unpackFS $ sl_fs sl))
+    l1' <- printStringAtAA l1 (sourceTextToString (sl_st sl) (utf8DecodeByteString $ sl_fs sl))
     c' <- markEpToken c
     return (HsPragSCC (AnnPragma o' c' s l1' l2 t m,st) sl)
 
@@ -4433,7 +4434,7 @@ exactBang ((o,c,tk), mt) str = do
       NoSourceText -> return (o,c)
       SourceText src -> do
         debugM $ "HsBangTy: src=" ++ showAst src
-        o' <- printStringAtAA o (unpackFS src)
+        o' <- printStringAtAA o (utf8DecodeByteString src)
         c' <- markEpToken c
         return (o',c')
   tk' <-
@@ -4783,7 +4784,7 @@ instance ExactPrint (HsOverLit GhcPs) where
                 HsIsString src _ -> src
     in
       case str of
-        SourceText s -> printStringAdvance (unpackFS s) >> return ol
+        SourceText s -> printStringAdvance (utf8DecodeByteString s) >> return ol
         NoSourceText -> return ol
 
 -- ---------------------------------------------------------------------
@@ -4812,11 +4813,11 @@ hsLit2String lit =
 
 toSourceTextWithSuffix :: (Show a) => SourceText -> a -> String -> String
 toSourceTextWithSuffix (NoSourceText)    alt suffix = show alt ++ suffix
-toSourceTextWithSuffix (SourceText txt) _alt suffix = unpackFS txt ++ suffix
+toSourceTextWithSuffix (SourceText txt) _alt suffix = utf8DecodeByteString txt ++ suffix
 
 sourceTextToString :: SourceText -> String -> String
 sourceTextToString NoSourceText alt   = alt
-sourceTextToString (SourceText txt) _ = unpackFS txt
+sourceTextToString (SourceText txt) _ = utf8DecodeByteString txt
 
 -- ---------------------------------------------------------------------
 
