@@ -833,7 +833,7 @@ mkWWBindPair ww_opts fn_id fn_info fn_args fn_body work_uniq div
                    NoInline -> inl_act fn_inl_prag
                    _        -> inl_act wrap_prag
 
-    srcTxt = SourceText $ fsLit "{-# INLINE"
+    srcTxt = SourceText $ utf8EncodeByteString "{-# INLINE"
     work_prag = InlinePragma { inl_ext = XInlinePragmaGhc srcTxt AnySaturation
                              , inl_inline = fn_inline_spec
                              , inl_act    = work_act
