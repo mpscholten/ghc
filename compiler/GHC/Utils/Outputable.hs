@@ -30,7 +30,7 @@ module GHC.Utils.Outputable (
         pprWithBars,
         spaceIfSingleQuote,
         isEmpty, nest,
-        ptext, bstext,
+        ptext,
         int, intWithCommas, integer, natural, word64, word, float, double, rational, doublePrec,
         parens, cparen, brackets, braces, quotes, quote, quoteIfPunsEnabled,
         doubleQuotes, angleBrackets,
