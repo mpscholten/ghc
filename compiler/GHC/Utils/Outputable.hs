@@ -1879,7 +1879,7 @@ class IsOutput doc => IsLine doc where
   -- which type the result is instantiated to. This should generally be avoided;
   -- see Note [dualLine and dualDoc] for details.
   dualLine :: SDoc -> HLine -> doc
-  
+
   bstext :: ByteString -> doc
   bstext s = text (utf8DecodeByteString s)
 
