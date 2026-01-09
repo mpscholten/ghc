@@ -3471,16 +3471,16 @@ ignoredPrags = Map.fromList (map ignored pragmas)
 oneWordPrags = Map.fromList
     [ ("rules", rulePrag)
     , ("inline"
-      , bstoken (\s -> ITinline_prag (SourceText s) (Inline (SourceText s)) FunLike)
+      , bstoken (\s -> ITinline_prag (SourceText s) Inline FunLike)
       )
     , ("inlinable"
-      , bstoken (\s -> ITinline_prag (SourceText s) (Inlinable (SourceText s)) FunLike)
+      , bstoken (\s -> ITinline_prag (SourceText s) Inlinable FunLike)
       )
     , ("inlineable" -- Spelling variant
-      , bstoken (\s -> ITinline_prag (SourceText s) (Inlinable (SourceText s)) FunLike)
+      , bstoken (\s -> ITinline_prag (SourceText s) Inlinable FunLike)
       )
     , ("notinline"
-      , bstoken (\s -> ITinline_prag (SourceText s) (NoInline (SourceText s)) FunLike)
+      , bstoken (\s -> ITinline_prag (SourceText s) NoInline FunLike)
       )
     , ("opaque",      bstoken (\s -> ITopaque_prag     (SourceText s)))
     , ("specialize",  bstoken (\s -> ITspec_prag       (SourceText s)))
@@ -3500,15 +3500,26 @@ oneWordPrags = Map.fromList
     , ("complete",    bstoken (\s -> ITcomplete_prag  (SourceText s)))
 
     , ("inline conlike"
-      , bstoken (\s -> ITinline_prag (SourceText s) (Inline (SourceText s)) ConLike)
+      , bstoken (\s -> ITinline_prag (SourceText s) Inline ConLike)
       )
     , ("notinline conlike"
-      , bstoken (\s -> ITinline_prag (SourceText s) (NoInline (SourceText s)) ConLike)
+      , bstoken (\s -> ITinline_prag (SourceText s) NoInline ConLike)
       )
 
     , ("specialize inline",    bstoken (\s -> ITspec_inline_prag (SourceText s) True))
     , ("specialize notinline", bstoken (\s -> ITspec_inline_prag (SourceText s) False))
     ]
+
+twoWordPrags = Map.fromList [
+     ("inline conlike",
+         bstoken (\s -> (ITinline_prag (SourceText s) Inline ConLike))),
+     ("notinline conlike",
+         bstoken (\s -> (ITinline_prag (SourceText s) NoInline ConLike))),
+     ("specialize inline",
+         bstoken (\s -> (ITspec_inline_prag (SourceText s) True))),
+     ("specialize notinline",
+         bstoken (\s -> (ITspec_inline_prag (SourceText s) False)))
+     ]
 
 dispatch_pragmas :: Map String Action -> Action
 dispatch_pragmas prags span buf len buf2 =

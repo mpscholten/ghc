@@ -123,6 +123,7 @@ import Data.Data (Data)
 
 import Language.Haskell.Syntax.Binds.InlinePragma
 import Language.Haskell.Syntax.Extension
+import GHC.Utils.Encoding.UTF8 (utf8EncodeByteString)
 
 -- infixl so you can say (prag `set` a `set` b)
 infixl 1 `setInlinePragmaActivation`,
@@ -216,7 +217,7 @@ type instance XXActivation   (GhcPass _) = XXActivationGhc
 -- type of 'inl_ext'.
 defaultInlinePragma :: forall p. IsPass p => InlinePragma (GhcPass p)
 defaultInlinePragma =
-  let srcTxt = SourceText $ fsLit "{-# INLINE"
+  let srcTxt = SourceText $ utf8EncodeByteString "{-# INLINE"
       inlExt =  case ghcPass @p of
         GhcPs -> srcTxt
         GhcRn -> XInlinePragmaGhc srcTxt AnySaturation
