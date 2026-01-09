@@ -77,6 +77,7 @@ import GHC.Exts
 
 import Foreign
 import GHC.ForeignPtr (unsafeWithForeignPtr)
+import qualified Data.ByteString.Internal as BSI
 
 -- -----------------------------------------------------------------------------
 -- The StringBuffer type
@@ -394,10 +395,8 @@ lexemeToByteString :: StringBuffer
                    -> Int               -- ^ @n@, the number of bytes
                    -> BS.ByteString
 lexemeToByteString _ 0 = BS.empty
-lexemeToByteString (StringBuffer buf _ cur) len =
-   inlinePerformIO $
-     unsafeWithForeignPtr buf $ \ptr ->
-       BS.packCStringLen (ptr `plusPtr` cur, len)
+lexemeToByteString (StringBuffer fp _ cur) n =
+    BSI.fromForeignPtr fp cur n
 
 -- | Return the previous @n@ characters (or fewer if we are less than @n@
 -- characters into the buffer.
