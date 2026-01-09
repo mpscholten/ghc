@@ -3468,47 +3468,36 @@ ignoredPrags = Map.fromList (map ignored pragmas)
                      -- CFILES is a hugs-only thing.
                      pragmas = options_pragmas ++ ["cfiles", "contract"]
 
-oneWordPrags = Map.fromList
-    [ ("rules", rulePrag)
-    , ("inline"
-      , bstoken (\s -> ITinline_prag (SourceText s) Inline FunLike)
-      )
-    , ("inlinable"
-      , bstoken (\s -> ITinline_prag (SourceText s) Inlinable FunLike)
-      )
-    , ("inlineable" -- Spelling variant
-      , bstoken (\s -> ITinline_prag (SourceText s) Inlinable FunLike)
-      )
-    , ("notinline"
-      , bstoken (\s -> ITinline_prag (SourceText s) NoInline FunLike)
-      )
-    , ("opaque",      bstoken (\s -> ITopaque_prag     (SourceText s)))
-    , ("specialize",  bstoken (\s -> ITspec_prag       (SourceText s)))
-    , ("source",      bstoken (\s -> ITsource_prag     (SourceText s)))
-    , ("warning",     bstoken (\s -> ITwarning_prag    (SourceText s)))
-    , ("deprecated",  bstoken (\s -> ITdeprecated_prag (SourceText s)))
-    , ("scc",         bstoken (\s -> ITscc_prag        (SourceText s)))
-    , ("unpack",      bstoken (\s -> ITunpack_prag     (SourceText s)))
-    , ("nounpack",    bstoken (\s -> ITnounpack_prag   (SourceText s)))
-    , ("ann",         bstoken (\s -> ITann_prag        (SourceText s)))
-    , ("minimal",     bstoken (\s -> ITminimal_prag    (SourceText s)))
-    , ("overlaps",    bstoken (\s -> IToverlaps_prag   (SourceText s)))
-    , ("overlappable",bstoken (\s -> IToverlappable_prag (SourceText s)))
-    , ("overlapping", bstoken (\s -> IToverlapping_prag  (SourceText s)))
-    , ("incoherent",  bstoken (\s -> ITincoherent_prag (SourceText s)))
-    , ("ctype",       bstoken (\s -> ITctype          (SourceText s)))
-    , ("complete",    bstoken (\s -> ITcomplete_prag  (SourceText s)))
+oneWordPrags = Map.fromList [
+     ("rules", rulePrag),
+     ("inline",
+         bstoken (\s -> (ITinline_prag (SourceText s) Inline FunLike))),
+     ("inlinable",
+         bstoken (\s -> (ITinline_prag (SourceText s) Inlinable FunLike))),
+     ("inlineable",
+         bstoken (\s -> (ITinline_prag (SourceText s) Inlinable FunLike))),
+                                    -- Spelling variant
+     ("notinline",
+         bstoken (\s -> (ITinline_prag (SourceText s) NoInline FunLike))),
+     ("opaque", bstoken (\s -> ITopaque_prag (SourceText s))),
+     ("specialize", bstoken (\s -> ITspec_prag (SourceText s))),
+     ("source", bstoken (\s -> ITsource_prag (SourceText s))),
+     ("warning", bstoken (\s -> ITwarning_prag (SourceText s))),
+     ("deprecated", bstoken (\s -> ITdeprecated_prag (SourceText s))),
+     ("scc", bstoken (\s -> ITscc_prag (SourceText s))),
+     ("unpack", bstoken (\s -> ITunpack_prag (SourceText s))),
+     ("nounpack", bstoken (\s -> ITnounpack_prag (SourceText s))),
+     ("ann", bstoken (\s -> ITann_prag (SourceText s))),
+     ("minimal", bstoken (\s -> ITminimal_prag (SourceText s))),
+     ("overlaps", bstoken (\s -> IToverlaps_prag (SourceText s))),
+     ("overlappable", bstoken (\s -> IToverlappable_prag (SourceText s))),
+     ("overlapping", bstoken (\s -> IToverlapping_prag (SourceText s))),
+     ("incoherent", bstoken (\s -> ITincoherent_prag (SourceText s))),
+     ("ctype", bstoken (\s -> ITctype (SourceText s))),
+     ("complete", bstoken (\s -> ITcomplete_prag (SourceText s))),
+     ("column", columnPrag)
+     ]
 
-    , ("inline conlike"
-      , bstoken (\s -> ITinline_prag (SourceText s) Inline ConLike)
-      )
-    , ("notinline conlike"
-      , bstoken (\s -> ITinline_prag (SourceText s) NoInline ConLike)
-      )
-
-    , ("specialize inline",    bstoken (\s -> ITspec_inline_prag (SourceText s) True))
-    , ("specialize notinline", bstoken (\s -> ITspec_inline_prag (SourceText s) False))
-    ]
 
 twoWordPrags = Map.fromList [
      ("inline conlike",
