@@ -44,6 +44,7 @@ import GHC hiding (HsTypeGhcPsExt (..))
 import GHC.Builtin.Types (liftedRepTy)
 import GHC.Core.TyCo.Rep (Type (..))
 import GHC.Core.Type (binderVar, isRuntimeRepVar)
+import GHC.Data.OsPath (OsPath, unsafeDecodeUtf)
 import GHC.Data.StringBuffer (StringBuffer)
 import qualified GHC.Data.StringBuffer as S
 import GHC.Driver.Session
@@ -632,16 +633,17 @@ modifySessionDynFlags f = do
 -------------------------------------------------------------------------------
 
 -- TODO: use `setOutputDir` from GHC
-setOutputDir :: FilePath -> DynFlags -> DynFlags
+setOutputDir :: OsPath -> DynFlags -> DynFlags
 setOutputDir dir dynFlags =
-  dynFlags
-    { objectDir = Just dir
-    , hiDir = Just dir
-    , hieDir = Just dir
-    , stubDir = Just dir
-    , includePaths = addGlobalInclude (includePaths dynFlags) [dir]
-    , dumpDir = Just dir
-    }
+  let dir' = unsafeDecodeUtf dir
+   in dynFlags
+        { objectDir = Just dir'
+        , hiDir = Just dir'
+        , hieDir = Just dir'
+        , stubDir = Just dir'
+        , includePaths = addGlobalInclude (includePaths dynFlags) [dir']
+        , dumpDir = Just dir'
+        }
 
 -------------------------------------------------------------------------------
 

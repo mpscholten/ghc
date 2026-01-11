@@ -72,14 +72,16 @@ import Data.List (isSuffixOf)
 import Data.Map (Map)
 import qualified Data.Map as Map hiding (Map)
 import GHC
+import GHC.Data.OsPath (OsPath)
 import GHC.Types.Name
 import Numeric (showIntAtBase)
-import System.Directory (createDirectory, removeDirectoryRecursive)
+import System.Directory.OsPath (createDirectory, removeDirectoryRecursive)
 import System.Environment (getProgName)
 import System.Exit
 import qualified System.FilePath.Posix as HtmlPath
-import System.IO (IOMode (..), hPutStr, hSetEncoding, utf8, withFile)
+import System.IO (IOMode (..), hPutStr, hSetEncoding, utf8)
 import System.IO.Unsafe (unsafePerformIO)
+import qualified System.OsPath as OsPath
 
 import Documentation.Haddock.Doc (emptyMetaDoc)
 import Haddock.Types
@@ -294,12 +296,12 @@ isAlphaNumChar c = isAlphaChar c || isDigitChar c
 -- The problem with 'writeFile' is that it picks up its 'TextEncoding' from
 -- 'getLocaleEncoding', and on some platforms (like Windows) this default
 -- encoding isn't enough for the characters we want to write.
-writeUtf8File :: FilePath -> String -> IO ()
-writeUtf8File filepath contents = withFile filepath WriteMode $ \h -> do
+writeUtf8File :: OsPath -> String -> IO ()
+writeUtf8File filepath contents = OsPath.withFile filepath WriteMode $ \h -> do
   hSetEncoding h utf8
   hPutStr h contents
 
-withTempDir :: (MonadIO m, MonadMask m) => FilePath -> m a -> m a
+withTempDir :: (MonadIO m, MonadMask m) => OsPath -> m a -> m a
 withTempDir dir =
   bracket_
     (liftIO $ createDirectory dir)

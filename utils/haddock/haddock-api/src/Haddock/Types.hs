@@ -53,6 +53,7 @@ import qualified Data.Map as Map
 import qualified Data.Set as Set
 import GHC
 import GHC.Data.BooleanFormula (BooleanFormula)
+import GHC.Data.OsPath (OsPath)
 import GHC.Driver.Session (Language)
 import qualified GHC.LanguageExtensions as LangExt
 import GHC.Core.InstEnv (is_dfun_name)
@@ -80,9 +81,9 @@ type DeclMap = Map Name DeclMapEntry
 type InstMap = Map RealSrcSpan Name
 type FixMap = Map Name Fixity
 data DocPaths = DocPaths
-  { docPathsHtml :: FilePath
+  { docPathsHtml :: OsPath
   -- ^ path to HTML Haddocks
-  , docPathsSources :: Maybe FilePath
+  , docPathsSources :: Maybe OsPath
   -- ^ path to hyperlinked sources
   }
 type WarningMap = Map Name (Doc Name)
@@ -144,7 +145,7 @@ data Interface = Interface
   -- tuple. Haddockable items are the exports and the module itself.
   , ifaceWarningMap :: WarningMap
   -- ^ Warnings for things defined in this module.
-  , ifaceHieFile :: !FilePath
+  , ifaceHieFile :: !OsPath
   -- ^ Tokenized source code of module (available if Haddock is invoked with
   -- source generation flag).
   , ifaceDynFlags :: !DynFlags

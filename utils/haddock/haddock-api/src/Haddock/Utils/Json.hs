@@ -49,6 +49,7 @@ import Data.Int
 import Data.List (intersperse)
 import Data.Monoid
 import Data.Word
+import GHC.Data.OsPath (OsPath, unsafeDecodeUtf)
 import GHC.Natural
 import qualified Text.Parsec.ByteString.Lazy as Parsec.Lazy
 import qualified Text.ParserCombinators.Parsec as Parsec
@@ -534,9 +535,9 @@ eitherDecodeWith decoder bsl =
 eitherDecode :: FromJSON a => BSL.ByteString -> Either String a
 eitherDecode = eitherDecodeWith fromJSON
 
-decodeFile :: FromJSON a => FilePath -> IO (Maybe a)
+decodeFile :: FromJSON a => OsPath -> IO (Maybe a)
 decodeFile filePath = do
-  parsecResult <- Parsec.Lazy.parseFromFile parseJSONValue filePath
+  parsecResult <- Parsec.Lazy.parseFromFile parseJSONValue (unsafeDecodeUtf filePath)
   case parsecResult of
     Right r ->
       case fromJSON r of
@@ -544,9 +545,9 @@ decodeFile filePath = do
         Error _ -> return Nothing
     Left _ -> return Nothing
 
-eitherDecodeFile :: FromJSON a => FilePath -> IO (Either String a)
+eitherDecodeFile :: FromJSON a => OsPath -> IO (Either String a)
 eitherDecodeFile filePath = do
-  parsecResult <- Parsec.Lazy.parseFromFile parseJSONValue filePath
+  parsecResult <- Parsec.Lazy.parseFromFile parseJSONValue (unsafeDecodeUtf filePath)
   case parsecResult of
     Right r ->
       case fromJSON r of

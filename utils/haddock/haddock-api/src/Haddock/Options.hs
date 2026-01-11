@@ -56,6 +56,7 @@ import qualified Data.Set as Set
 import Data.Version
 import GHC (Module, moduleUnit)
 import GHC.Data.FastString
+import GHC.Data.OsPath (OsPath, encodeUtf, unsafeDecodeUtf, unsafeEncodeUtf)
 import GHC.Unit.State
 import System.Console.GetOpt
 import qualified Text.ParserCombinators.ReadP as RP
@@ -74,8 +75,8 @@ data Flag
   | Flag_Html
   | Flag_Hoogle
   | Flag_Lib String
-  | Flag_OutputDir FilePath
-  | Flag_Prologue FilePath
+  | Flag_OutputDir OsPath
+  | Flag_Prologue OsPath
   | Flag_SourceBaseURL String
   | Flag_SourceModuleURL String
   | Flag_SourceEntityURL String
@@ -137,7 +138,7 @@ options backwardsCompat =
   , Option
       ['o']
       ["odir"]
-      (ReqArg Flag_OutputDir "DIR")
+      (ReqArg (Flag_OutputDir . unsafeEncodeUtf) "DIR")
       "directory in which to put the output files"
   , Option
       ['l']
@@ -253,7 +254,7 @@ options backwardsCompat =
   , Option
       ['p']
       ["prologue"]
-      (ReqArg Flag_Prologue "FILE")
+      (ReqArg (Flag_Prologue . unsafeEncodeUtf) "FILE")
       "file containing prologue text"
   , Option
       ['t']
@@ -444,10 +445,10 @@ optTitle flags =
     [] -> Nothing
     (t : _) -> Just t
 
-outputDir :: [Flag] -> FilePath
+outputDir :: [Flag] -> OsPath
 outputDir flags =
   case [path | Flag_OutputDir path <- flags] of
-    [] -> "."
+    [] -> unsafeEncodeUtf "."
     paths -> last paths
 
 optContentsUrl :: [Flag] -> Maybe String
@@ -456,11 +457,11 @@ optContentsUrl flags = optLast [url | Flag_UseContents url <- flags]
 optIndexUrl :: [Flag] -> Maybe String
 optIndexUrl flags = optLast [url | Flag_UseIndex url <- flags]
 
-optCssFile :: [Flag] -> Maybe FilePath
-optCssFile flags = optLast [str | Flag_CSS str <- flags]
+optCssFile :: [Flag] -> Maybe OsPath
+optCssFile flags = unsafeEncodeUtf <$> optLast [str | Flag_CSS str <- flags]
 
-optSourceCssFile :: [Flag] -> Maybe FilePath
-optSourceCssFile flags = optLast [str | Flag_SourceCss str <- flags]
+optSourceCssFile :: [Flag] -> Maybe OsPath
+optSourceCssFile flags = unsafeEncodeUtf <$> optLast [str | Flag_SourceCss str <- flags]
 
 sourceUrls :: [Flag] -> (Maybe String, Maybe String, Maybe String, Maybe String)
 sourceUrls flags =
@@ -480,11 +481,11 @@ wikiUrls flags =
 baseUrl :: [Flag] -> Maybe String
 baseUrl flags = optLast [str | Flag_BaseURL str <- flags]
 
-optDumpInterfaceFile :: [Flag] -> Maybe FilePath
-optDumpInterfaceFile flags = optLast [str | Flag_DumpInterface str <- flags]
+optDumpInterfaceFile :: [Flag] -> Maybe OsPath
+optDumpInterfaceFile flags = unsafeEncodeUtf <$> optLast [str | Flag_DumpInterface str <- flags]
 
-optShowInterfaceFile :: [Flag] -> Maybe FilePath
-optShowInterfaceFile flags = optLast [str | Flag_ShowInterface str <- flags]
+optShowInterfaceFile :: [Flag] -> Maybe OsPath
+optShowInterfaceFile flags = unsafeEncodeUtf <$> optLast [str | Flag_ShowInterface str <- flags]
 
 optOneShot :: [Flag] -> Maybe String
 optOneShot flags = optLast [str | Flag_OneShot str <- flags]
@@ -569,10 +570,10 @@ reexportFlags flags = [option | Flag_Reexport option <- flags]
 data Visibility = Visible | Hidden
   deriving (Eq, Ord, Show)
 
-readIfaceArgs :: [Flag] -> [(DocPaths, Visibility, FilePath)]
+readIfaceArgs :: [Flag] -> [(DocPaths, Visibility, OsPath)]
 readIfaceArgs flags = [parseIfaceOption s | Flag_ReadInterface s <- flags]
   where
-    parseIfaceOption :: String -> (DocPaths, Visibility, FilePath)
+    parseIfaceOption :: String -> (DocPaths, Visibility, OsPath)
     parseIfaceOption str =
       case break (== ',') str of
         (fpath, ',' : rest) ->
@@ -580,22 +581,22 @@ readIfaceArgs flags = [parseIfaceOption s | Flag_ReadInterface s <- flags]
             (src, ',' : rest') ->
               let src' = case src of
                     "" -> Nothing
-                    _ -> Just src
+                    _ -> Just (unsafeEncodeUtf src)
                   docPaths =
                     DocPaths
-                      { docPathsHtml = fpath
+                      { docPathsHtml = unsafeEncodeUtf fpath
                       , docPathsSources = src'
                       }
                in case break (== ',') rest' of
                     (visibility, ',' : file)
                       | visibility == "hidden" ->
-                          (docPaths, Hidden, file)
+                          (docPaths, Hidden, unsafeEncodeUtf file)
                       | otherwise ->
-                          (docPaths, Visible, file)
+                          (docPaths, Visible, unsafeEncodeUtf file)
                     (file, _) ->
-                      (docPaths, Visible, file)
-            (file, _) -> (DocPaths fpath Nothing, Visible, file)
-        (file, _) -> (DocPaths "" Nothing, Visible, file)
+                      (docPaths, Visible, unsafeEncodeUtf file)
+            (file, _) -> (DocPaths (unsafeEncodeUtf fpath) Nothing, Visible, unsafeEncodeUtf file)
+        (file, _) -> (DocPaths (unsafeEncodeUtf "") Nothing, Visible, unsafeEncodeUtf file)
 
 -- | Like 'listToMaybe' but returns the last element instead of the first.
 optLast :: [a] -> Maybe a
