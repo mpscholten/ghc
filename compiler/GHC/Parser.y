@@ -98,6 +98,7 @@ import GHC.Utils.Encoding.UTF8 (utf8DecodeByteString)
 
 import qualified Data.Semigroup as Semi
 import qualified Data.ByteString as BS
+import qualified Data.ByteString as BSC
 }
 
 %expect 0 -- shift/reduce conflicts
@@ -4132,7 +4133,7 @@ consym :: { LocatedN RdrName }
 literal :: { Located (HsLit GhcPs) }
         : CHAR              { sL1 $1 $ HsChar       (getCHARs $1) $ getCHAR $1 }
         | STRING            { sL1 $1 $ HsString     (getSTRINGs $1)
-                                                    $ (mkFastStringByteString (getSTRING $1)) }
+                                                    $ (mkFastString (utf8DecodeByteString (getSTRING $1))) }
         | STRING_MULTI      { sL1 $1 $ HsMultilineString (getSTRINGMULTIs $1)
                                                     $ (mkFastStringByteString (getSTRINGMULTI $1)) }
         | PRIMINTEGER       { sL1 $1 $ HsIntPrim    (getPRIMINTEGERs $1)
