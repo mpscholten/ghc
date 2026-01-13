@@ -15,7 +15,7 @@ module GHC.Core.Make (
         mkIntExpr, mkIntExprInt, mkUncheckedIntExpr,
         mkIntegerExpr, mkNaturalExpr,
         mkFloatExpr, mkDoubleExpr,
-        mkCharExpr, mkStringExpr, mkStringExprFS, mkStringExprFSWith,
+        mkCharExpr, mkStringExpr, mkStringExprFS, mkStringExprFSWith, mkStringExprBS, mkStringExprBSWith,
         MkStringIds (..), getMkStringIds,
 
         -- * Floats
@@ -87,6 +87,10 @@ import GHC.Data.Maybe ( expectJust )
 import Data.List        ( partition )
 import Data.List.NonEmpty ( NonEmpty (..) )
 import Data.Char        ( ord )
+
+import qualified Data.ByteString as BS
+import Data.ByteString (ByteString)
+import qualified Data.ByteString.Char8 as BSC
 
 infixl 4 `mkCoreApp`, `mkCoreApps`
 
@@ -297,10 +301,18 @@ mkStringExpr str = mkStringExprFS (mkFastString str)
 mkStringExprFS :: MonadThings m => FastString -> m CoreExpr  -- Result :: String
 mkStringExprFS = mkStringExprFSLookup lookupId
 
+mkStringExprBS :: MonadThings m => ByteString -> m CoreExpr  -- Result :: String
+mkStringExprBS = mkStringExprBSLookup lookupId
+
 mkStringExprFSLookup :: Monad m => (Name -> m Id) -> FastString -> m CoreExpr
 mkStringExprFSLookup lookupM str = do
   mk <- getMkStringIds lookupM
   pure (mkStringExprFSWith mk str)
+
+mkStringExprBSLookup :: Monad m => (Name -> m Id) -> ByteString -> m CoreExpr
+mkStringExprBSLookup lookupM str = do
+  mk <- getMkStringIds lookupM
+  pure (mkStringExprBSWith mk str)
 
 getMkStringIds :: Applicative m => (Name -> m Id) -> m MkStringIds
 getMkStringIds lookupM = MkStringIds <$> lookupM unpackCStringName <*> lookupM unpackCStringUtf8Name
@@ -315,6 +327,11 @@ mkStringExprFSWith ids str
   | nullFS str
   = mkNilExpr charTy
 
+  | elem '\0' chars
+  = let !unpack_utf8_id = unpackCStringUtf8Id ids
+        !lit' = Lit (LitString (encodeModifiedUtf8Nul (bytesFS str)))
+    in App (Var unpack_utf8_id) lit'
+
   | all safeChar chars
   = let !unpack_id = unpackCStringId ids
     in App (Var unpack_id) lit
@@ -327,6 +344,41 @@ mkStringExprFSWith ids str
     chars = unpackFS str
     safeChar c = ord c >= 1 && ord c <= 0x7F
     lit = Lit (LitString (bytesFS str))
+
+mkStringExprBSWith :: MkStringIds -> ByteString -> CoreExpr
+mkStringExprBSWith ids str
+  | BS.null str
+  = mkNilExpr charTy
+
+  -- NUL bytes would truncate unpackCString# (C-string semantics).
+  -- Use unpackCStringUtf8# and encode NUL as 0xC0 0x80 (Modified UTF-8),
+  -- matching GHC's string-literal strategy.
+  | BS.elem 0 str
+  = let !unpack_utf8_id = unpackCStringUtf8Id ids
+        !lit' = Lit (LitString (encodeModifiedUtf8Nul str))
+    in App (Var unpack_utf8_id) lit'
+
+  | BS.all safeChar str
+  = let !unpack_id = unpackCStringId ids
+    in App (Var unpack_id) lit
+
+  | otherwise
+  = let !unpack_utf8_id = unpackCStringUtf8Id ids
+    in App (Var unpack_utf8_id) lit
+
+  where
+    safeChar c = c >= 1 && c <= 0x7F
+    lit = Lit (LitString str)
+
+-- Replace literal NUL bytes with the Modified UTF-8 encoding of U+0000:
+--   0x00 -> 0xC0 0x80
+encodeModifiedUtf8Nul :: ByteString -> ByteString
+encodeModifiedUtf8Nul =
+    BS.concatMap (\w ->
+        if w == 0
+            then BS.pack [0xC0, 0x80]
+            else BS.singleton w
+            )
 
 {-
 ************************************************************************

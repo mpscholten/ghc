@@ -45,9 +45,9 @@ data HsLit x
       -- ^ Character
   | HsCharPrim (XHsCharPrim x) {- SourceText -} Char
       -- ^ Unboxed character
-  | HsString (XHsString x) {- SourceText -} FastString
+  | HsString (XHsString x) {- SourceText -} ByteString
       -- ^ String
-  | HsMultilineString (XHsMultilineString x) {- SourceText -} FastString
+  | HsMultilineString (XHsMultilineString x) {- SourceText -} ByteString
       -- ^ String
   | HsStringPrim (XHsStringPrim x) {- SourceText -} !ByteString
       -- ^ Packed bytes
@@ -110,7 +110,7 @@ data HsOverLit p
 data OverLitVal
   = HsIntegral   !IntegralLit            -- ^ Integer-looking literals;
   | HsFractional !FractionalLit          -- ^ Frac-looking literals
-  | HsIsString   !SourceText !FastString -- ^ String-looking literals
+  | HsIsString   !SourceText !ByteString -- ^ String-looking literals
   deriving Data
 
 instance Eq OverLitVal where
@@ -126,6 +126,6 @@ instance Ord OverLitVal where
   compare (HsFractional f1)   (HsFractional f2)   = f1 `compare` f2
   compare (HsFractional _)    (HsIntegral   _)    = GT
   compare (HsFractional _)    (HsIsString _ _)    = LT
-  compare (HsIsString _ s1)   (HsIsString _ s2)   = s1 `lexicalCompareFS` s2
+  compare (HsIsString _ s1)   (HsIsString _ s2)   = s1 `compare` s2
   compare (HsIsString _ _)    (HsIntegral   _)    = GT
   compare (HsIsString _ _)    (HsFractional _)    = GT

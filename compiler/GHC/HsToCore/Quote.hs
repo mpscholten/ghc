@@ -83,7 +83,7 @@ import Data.Kind (Constraint)
 
 import qualified GHC.LanguageExtensions as LangExt
 
-import Data.ByteString ( unpack )
+import Data.ByteString ( ByteString, unpack )
 import Control.Monad
 import Data.List (sort, sortBy)
 import Data.List.NonEmpty ( NonEmpty(..), toList )
@@ -3087,7 +3087,7 @@ mk_rational :: FractionalLit -> MetaM (HsLit GhcTc)
 mk_rational r = do rat_ty <- lookupType rationalTyConName
                    return $ XLit $ HsRat r rat_ty
 
-mk_string :: FastString -> MetaM (HsLit GhcRn)
+mk_string :: ByteString -> MetaM (HsLit GhcRn)
 mk_string s = return $ HsString NoSourceText s
 
 mk_char :: Char -> MetaM (HsLit GhcRn)

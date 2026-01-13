@@ -154,6 +154,8 @@ import Data.IntMap ( IntMap )
 import qualified Data.IntMap.Strict as IntMap
 import Data.Map ( Map )
 import qualified Data.Map.Strict as Map
+import GHC.Utils.Encoding (utf8EncodeByteString)
+import Data.ByteString (ByteString)
 
 {-
 ************************************************************************
@@ -318,7 +320,7 @@ nlParPat p = noLocA (gParPat p)
 
 mkHsIntegral   :: IntegralLit -> HsOverLit GhcPs
 mkHsFractional :: FractionalLit -> HsOverLit GhcPs
-mkHsIsString   :: SourceText -> FastString -> HsOverLit GhcPs
+mkHsIsString   :: SourceText -> ByteString -> HsOverLit GhcPs
 mkHsDo         :: HsDoFlavour -> LocatedLW [ExprLStmt GhcPs] -> HsExpr GhcPs
 mkHsDoAnns     :: HsDoFlavour -> LocatedLW [ExprLStmt GhcPs] -> AnnList EpaLocation -> HsExpr GhcPs
 mkHsComp       :: HsDoFlavour -> [ExprLStmt GhcPs] -> LHsExpr GhcPs
@@ -467,10 +469,10 @@ mkHsOpApp :: LHsExpr GhcPs -> IdP GhcPs -> LHsExpr GhcPs -> HsExpr GhcPs
 mkHsOpApp e1 op e2 = OpApp noExtField e1 (noLocA (mkHsVar (noLocA op))) e2
 
 mkHsString :: String -> HsLit (GhcPass p)
-mkHsString s = HsString NoSourceText (mkFastString s)
+mkHsString s = HsString NoSourceText (utf8EncodeByteString s)
 
 mkHsStringFS :: FastString -> HsLit (GhcPass p)
-mkHsStringFS s = HsString NoSourceText s
+mkHsStringFS s = HsString NoSourceText (bytesFS s)
 
 mkHsStringPrimLit :: FastString -> HsLit (GhcPass p)
 mkHsStringPrimLit fs = HsStringPrim NoSourceText (bytesFS fs)

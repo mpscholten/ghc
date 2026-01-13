@@ -1416,7 +1416,7 @@ cvtOverLit (IntegerL i)
 cvtOverLit (RationalL r)
   = do { force r; return $ mkHsFractional (mkTHFractionalLit r) }
 cvtOverLit (StringL s)
-  = do { let { s' = mkFastString s }
+  = do { let { s' = utf8EncodeByteString s }
        ; force s'
        ; return $ mkHsIsString (quotedSourceText s) s'
        }
@@ -1454,7 +1454,7 @@ cvtLit (DoublePrimL f)
   = do { force f; return $ HsDoublePrim noExtField (mkTHFractionalLit f) }
 cvtLit (CharL c)       = do { force c; return $ HsChar NoSourceText c }
 cvtLit (CharPrimL c)   = do { force c; return $ HsCharPrim NoSourceText c }
-cvtLit (StringL s)     = do { let { s' = mkFastString s }
+cvtLit (StringL s)     = do { let { s' = utf8EncodeByteString s }
                             ; force s'
                             ; return $ HsString (quotedSourceText s) s' }
 cvtLit (StringPrimL s) = do { let { !s' = BS.pack s }

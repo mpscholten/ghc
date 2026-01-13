@@ -79,6 +79,10 @@ import Foreign
 import GHC.ForeignPtr (unsafeWithForeignPtr)
 import qualified Data.ByteString.Internal as BSI
 
+import qualified Data.ByteString as BS
+import Foreign.Marshal.Utils (copyBytes)
+import Foreign.Ptr (plusPtr)
+
 -- -----------------------------------------------------------------------------
 -- The StringBuffer type
 
@@ -395,8 +399,18 @@ lexemeToByteString :: StringBuffer
                    -> Int               -- ^ @n@, the number of bytes
                    -> BS.ByteString
 lexemeToByteString _ 0 = BS.empty
-lexemeToByteString (StringBuffer fp _ cur) n =
-    BSI.fromForeignPtr fp cur n
+lexemeToByteString (StringBuffer fp bufLen cur) n =
+    inlinePerformIO $
+        unsafeWithForeignPtr fp $ \srcBase -> do
+            let avail = bufLen - cur
+            let n' =
+                    if n <= 0 then 0
+                    else if n <= avail then n
+                    else avail
+            if n' <= 0
+                then pure BS.empty
+                else BSI.create n' $ \dst ->
+                    copyBytes dst (srcBase `plusPtr` cur) n'
 
 -- | Return the previous @n@ characters (or fewer if we are less than @n@
 -- characters into the buffer.

@@ -4785,12 +4785,12 @@ promotionErr name err
 
 
 tyLitFromLit :: HsLit GhcRn -> Maybe (HsTyLit GhcRn)
-tyLitFromLit (HsString x str) = Just (HsStrTy x str)
-tyLitFromLit (HsMultilineString x str) = Just (HsStrTy x str)
+tyLitFromLit (HsString x str) = Just (HsStrTy x (mkFastStringByteString str))
+tyLitFromLit (HsMultilineString x str) = Just (HsStrTy x (mkFastStringByteString str))
 tyLitFromLit (HsChar x char) = Just (HsCharTy x char)
 tyLitFromLit _ = Nothing
 
 tyLitFromOverloadedLit :: OverLitVal -> Maybe (HsTyLit GhcRn)
 tyLitFromOverloadedLit (HsIntegral n) = Just $ HsNumTy NoSourceText (il_value n)
-tyLitFromOverloadedLit (HsIsString _ s) = Just $ HsStrTy NoSourceText s
+tyLitFromOverloadedLit (HsIsString _ s) = Just $ HsStrTy NoSourceText (mkFastStringByteString s)
 tyLitFromOverloadedLit HsFractional{} = Nothing
