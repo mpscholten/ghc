@@ -75,6 +75,7 @@ import Data.List( find )
 import qualified Data.Map as FM
 import GHC.Real (Ratio(..))
 import qualified Data.Semigroup as S
+import Data.ByteString (ByteString)
 
 -- * Normalised refinement types
 --
@@ -381,14 +382,14 @@ data PmLitValue
   = PmLitInt Integer
   | PmLitRat Rational
   | PmLitChar Char
-  | PmLitString FastString
+  | PmLitString ByteString
        -- We won't actually see PmLitString in the oracle
        -- since we desugar strings to lists
 
   -- Overloaded literals
   | PmLitOverInt Int {- How often Negated? -} Integer
   | PmLitOverRat Int {- How often Negated? -} FractionalLit
-  | PmLitOverString FastString
+  | PmLitOverString ByteString
 
 -- | Syntactic equality.
 -- We want (Ord PmLit) so that we can use (Map PmLit x) in `PmAltConSet`
@@ -412,14 +413,14 @@ cmpPmLit (PmLit { pm_lit_ty = t1, pm_lit_val = val1 })
       (PmLitInt i1, PmLitInt i2) -> i1 `compare` i2
       (PmLitRat r1, PmLitRat r2) -> r1 `compare` r2
       (PmLitChar c1, PmLitChar c2) -> c1 `compare` c2
-      (PmLitString s1, PmLitString s2) -> s1 `uniqCompareFS` s2
+      (PmLitString s1, PmLitString s2) -> s1 `compare` s2
       (PmLitOverInt n1 i1, PmLitOverInt n2 i2) -> (n1 `compare` n2) S.<>
                                                   (i1 `compare` i2) S.<>
                                                   (t1 `nonDetCmpType` t2)
       (PmLitOverRat n1 r1, PmLitOverRat n2 r2) -> (n1 `compare` n2) S.<>
                                                   (r1 `compare` r2) S.<>
                                                   (t1 `nonDetCmpType` t2)
-      (PmLitOverString s1, PmLitOverString s2) -> (s1 `uniqCompareFS` s2) S.<>
+      (PmLitOverString s1, PmLitOverString s2) -> (s1 `compare` s2) S.<>
                                                   (t1 `nonDetCmpType` t2)
       (PmLitInt {},    _) -> LT
       (PmLitRat {},    PmLitInt {})  -> GT
@@ -661,7 +662,7 @@ literalToPmLit ty l = PmLit ty <$> go l
     go (LitChar c)       = Just (PmLitChar c)
     go (LitFloat r)      = Just (PmLitRat r)
     go (LitDouble r)     = Just (PmLitRat r)
-    go (LitString s)     = Just (PmLitString (mkFastStringByteString s))
+    go (LitString s)     = Just (PmLitString s)
     go (LitNumber _ i)   = Just (PmLitInt i)
     go _                 = Nothing
 
@@ -685,7 +686,7 @@ overloadPmLit ty (PmLit _ v) = PmLit ty <$> go v
     go ovRat@PmLitOverRat{}  = Just ovRat
     go _               = Nothing
 
-pmLitAsStringLit :: PmLit -> Maybe FastString
+pmLitAsStringLit :: PmLit -> Maybe ByteString
 pmLitAsStringLit (PmLit _ (PmLitString s)) = Just s
 pmLitAsStringLit _                         = Nothing
 

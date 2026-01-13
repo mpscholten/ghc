@@ -98,7 +98,7 @@ import Data.Monoid   (Any(..))
 import Data.List     (sortBy, find)
 import qualified Data.List.NonEmpty as NE
 import Data.Ord      (comparing)
-
+import GHC.Utils.Encoding.UTF8 (utf8DecodeByteString)
 
 --
 -- * Main exports
@@ -863,7 +863,7 @@ addCoreCt nabla x e = do
       | Just (pmLitAsStringLit -> Just s) <- coreExprAsPmLit e
       , expr_ty `eqType` stringTy
       -- See Note [Representation of Strings in TmState]
-      = case unpackFS s of
+      = case utf8DecodeByteString s of
           -- We need this special case to break a loop with coreExprAsPmLit
           -- Otherwise we alternate endlessly between [] and ""
           [] -> data_con_app x emptyInScopeSet nilDataCon []

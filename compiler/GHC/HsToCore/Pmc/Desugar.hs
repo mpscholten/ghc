@@ -42,6 +42,8 @@ import GHC.Types.SourceText (FractionalLit(..))
 import Control.Monad (zipWithM, replicateM)
 import Data.List (elemIndex)
 import Data.List.NonEmpty ( NonEmpty(..) )
+import qualified Data.ByteString as BS
+import GHC.Utils.Encoding.UTF8 (utf8DecodeByteString)
 
 -- import GHC.Driver.Ppr
 
@@ -81,9 +83,9 @@ mkPmLitGrds x (PmLit _ (PmLitString s)) = do
   -- 'GHC.HsToCore.Pmc.Solver.addRefutableAltCon', but it's so much simpler
   -- here. See Note [Representation of Strings in TmState] in
   -- GHC.HsToCore.Pmc.Solver
-  vars <- replicateM (lengthFS s) (mkPmId charTy)
+  vars <- replicateM (BS.length s) (mkPmId charTy)
   let mk_char_lit y c = mkPmLitGrds y (PmLit charTy (PmLitChar c))
-  char_grdss <- zipWithM mk_char_lit vars (unpackFS s)
+  char_grdss <- zipWithM mk_char_lit vars (utf8DecodeByteString s)
   mkListGrds x (zip vars char_grdss)
 mkPmLitGrds x lit = do
   let grd = PmCon { pm_id = x
