@@ -400,17 +400,7 @@ lexemeToByteString :: StringBuffer
                    -> BS.ByteString
 lexemeToByteString _ 0 = BS.empty
 lexemeToByteString (StringBuffer fp bufLen cur) n =
-    inlinePerformIO $
-        unsafeWithForeignPtr fp $ \srcBase -> do
-            let avail = bufLen - cur
-            let n' =
-                    if n <= 0 then 0
-                    else if n <= avail then n
-                    else avail
-            if n' <= 0
-                then pure BS.empty
-                else BSI.create n' $ \dst ->
-                    copyBytes dst (srcBase `plusPtr` cur) n'
+    BSI.fromForeignPtr fp cur n
 
 -- | Return the previous @n@ characters (or fewer if we are less than @n@
 -- characters into the buffer.
