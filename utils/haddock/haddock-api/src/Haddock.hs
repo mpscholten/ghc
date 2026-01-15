@@ -41,6 +41,7 @@ import Data.Maybe
 import Data.IORef
 import Data.Map.Strict (Map)
 import Data.Version (makeVersion)
+import GHC.Conc (getNumProcessors)
 import GHC.Parser.Lexer (ParserOpts)
 import qualified GHC.Driver.Config.Parser as Parser
 import qualified Data.Map.Strict as Map
@@ -88,6 +89,13 @@ import Haddock.Compat (getProcessID)
 --------------------------------------------------------------------------------
 -- * Exception handling
 --------------------------------------------------------------------------------
+
+parLimitFromFlags :: [Flag] -> IO Int
+parLimitFromFlags flags =
+  case optParCount flags of
+    Nothing       -> pure 1
+    Just Nothing  -> getNumProcessors
+    Just (Just n) -> pure (max 1 n)
 
 
 handleTopExceptions :: IO a -> IO a
@@ -182,6 +190,8 @@ haddockWithGhc ghc args = handleTopExceptions $ do
     Nothing       -> flags''
     Just Nothing  -> Flag_OptGhc "-j" : flags''
     Just (Just n) -> Flag_OptGhc ("-j" ++ show n) : flags''
+
+  parLimit <- parLimitFromFlags flags''
 
   -- Whether or not to bypass the interface version check
   let noChecks = Flag_BypassInterfaceVersonCheck `elem` flags
@@ -516,7 +526,7 @@ render dflags parserOpts logger unit_state flags sinceQual qual ifaces packages 
                   prologue
                   themes opt_mathjax sourceUrls' opt_wiki_urls opt_base_url
                   opt_contents_url opt_index_url unicode sincePkg packageInfo
-                  qual pretty withQuickjump
+                  qual pretty parLimit withQuickjump
       return ()
     unless (withBaseURL || isJust (optOneShot flags)) $ do
       copyHtmlBits odir libDir themes withQuickjump
@@ -555,7 +565,7 @@ render dflags parserOpts logger unit_state flags sinceQual qual ifaces packages 
   when (Flag_HyperlinkedSource `elem` flags && not (null ifaces)) $ do
     withTiming logger "ppHyperlinkedSource" (const ()) $ do
       _ <- {-# SCC ppHyperlinkedSource #-}
-           ppHyperlinkedSource (verbosity flags) (isJust (optOneShot flags)) odir libDir opt_source_css pretty srcMap ifaces
+           ppHyperlinkedSource (verbosity flags) (isJust (optOneShot flags)) odir libDir opt_source_css pretty parLimit srcMap ifaces
       return ()
 
 
@@ -842,4 +852,3 @@ getPrologue parserOpts flags =
 rightOrThrowE :: Either String b -> IO b
 rightOrThrowE (Left msg) = throwE msg
 rightOrThrowE (Right x) = pure x
-

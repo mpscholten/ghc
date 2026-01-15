@@ -51,19 +51,21 @@ ppHyperlinkedSource
   -- ^ Custom CSS file path
   -> Bool
   -- ^ Flag indicating whether to pretty-print HTML
+  -> Int
+  -- ^ Maximum number of concurrent module renders
   -> M.Map Module SrcPath
   -- ^ Paths to sources
   -> [Interface]
   -- ^ Interfaces for which we create source
   -> IO ()
-ppHyperlinkedSource verbosity isOneShot outdir libdir mstyle pretty srcs' ifaces = do
+ppHyperlinkedSource verbosity isOneShot outdir libdir mstyle pretty parLimit srcs' ifaces = do
   createDirectoryIfMissing True srcdir
   unless isOneShot $ do
     let cssFile = fromMaybe (defaultCssFile libdir) mstyle
     copyFile cssFile $ srcdir </> srcCssFile
     copyFile (libdir </> "html" </> highlightScript) $
       srcdir </> highlightScript
-  mapConcurrently_ (ppHyperlinkedModuleSource verbosity srcdir pretty srcs) ifaces
+  mapConcurrently_ parLimit (ppHyperlinkedModuleSource verbosity srcdir pretty srcs) ifaces
   where
     srcdir = outdir </> hypSrcDir
     srcs = (srcs', M.mapKeys moduleName srcs')

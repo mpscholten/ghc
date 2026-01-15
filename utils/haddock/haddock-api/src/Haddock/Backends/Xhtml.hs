@@ -115,6 +115,8 @@ ppHtml
   -- ^ How to qualify names
   -> Bool
   -- ^ Output pretty html (newlines and indenting)
+  -> Int
+  -- ^ Maximum number of concurrent module renders
   -> Bool
   -- ^ Also write Quickjump index
   -> IO ()
@@ -138,6 +140,7 @@ ppHtml
   packageInfo
   qual
   debug
+  parLimit
   withQuickjump = do
     let
       visible_ifaces = filter visible ifaces
@@ -192,7 +195,7 @@ ppHtml
         visible_ifaces
         []
 
-    mapConcurrently_
+    mapConcurrently_ parLimit
       ( ppHtmlModule
           odir
           doctitle

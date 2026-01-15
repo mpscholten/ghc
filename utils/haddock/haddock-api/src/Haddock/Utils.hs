@@ -90,8 +90,11 @@ import Data.Text.Lazy (Text)
 import qualified Data.Text.Lazy as LText
 
 import Control.Concurrent (forkFinally)
+import Control.Concurrent.QSem (newQSem, signalQSem, waitQSem)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (throwIO)
+import Control.Monad (void)
+import System.Semaphore (AbstractSem (..))
 
 --------------------------------------------------------------------------------
 
@@ -345,19 +348,28 @@ html_xrefs' = unsafePerformIO (readIORef html_xrefs_ref')
 
 --------------------------------------------------------------------------------
 
--- | Execute an action for each element of a list concurrently.
+-- | Execute an action for each element of a list concurrently, bounded
+-- by the supplied maximum number of active threads.
 -- If any action throws an exception, all other actions are allowed to complete,
 -- then one of the exceptions is re-thrown. The order of exception re-throwing
 -- corresponds to the order of elements in the input list, not the chronological
 -- order in which exceptions occurred.
-mapConcurrently_ :: (a -> IO ()) -> [a] -> IO ()
+mapConcurrently_ :: Int -> (a -> IO ()) -> [a] -> IO ()
 mapConcurrently_ _ [] = return ()
-mapConcurrently_ f xs = do
+mapConcurrently_ maxThreads f xs = do
+  let threadLimit = max 1 maxThreads
+  sem <- newQSem threadLimit
+  let
+    gate =
+      AbstractSem
+        { acquireSem = waitQSem sem
+        , releaseSem = signalQSem sem
+        }
   -- Create MVars to wait for completion and collect results
   resultMVars <- mapM (const newEmptyMVar) xs
 
   -- Fork a thread for each element
-  mapM_ forkThread (zip xs resultMVars)
+  mapM_ (forkThread gate) (zip xs resultMVars)
 
   -- Wait for all threads and collect any errors
   results <- mapM takeMVar resultMVars
@@ -367,8 +379,11 @@ mapConcurrently_ f xs = do
     (err:_) -> throwIO err
     [] -> return ()
   where
-    forkThread (x, resultMVar) =
-      forkFinally (f x) (putMVar resultMVar)
+    forkThread gate (x, resultMVar) = do
+      acquireSem gate
+      void $ forkFinally (f x) $ \res -> do
+        releaseSem gate
+        putMVar resultMVar res
 
 
 -----------------------------------------------------------------------------
