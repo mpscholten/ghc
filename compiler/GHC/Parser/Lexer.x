@@ -134,7 +134,7 @@ import GHC.Parser.Errors.Ppr ()
 import GHC.Parser.Lexer.Interface
 import qualified GHC.Parser.Lexer.String as Lexer.String
 import GHC.Parser.String
-import GHC.Utils.Encoding (utf8DecodeByteString)
+import GHC.Utils.Encoding (utf8DecodeByteString, utf8EncodeByteString)
 }
 
 -- -----------------------------------------------------------------------------
@@ -2171,7 +2171,7 @@ tok_string span buf len _buf2 = do
         addError err
       pure $ L span (ITprimstring src (unsafeMkByteString s))
     else
-      pure $ L span (ITstring src (unsafeMkByteString s))
+      pure $ L span (ITstring src (utf8EncodeByteString s))
   where
     src = SourceText $ lexemeToByteString buf len
     endsInHash = currentChar (offsetBytes (len - 1) buf) == '#'
@@ -2215,7 +2215,7 @@ tok_string_multi startSpan startBuf _len _buf2 = do
       lexMultilineString contentLen contentStartBuf
 
   setInput i'
-  pure $ L span $ ITstringMulti src (unsafeMkByteString s)
+  pure $ L span $ ITstringMulti src (utf8EncodeByteString s)
   where
     goContent i0 =
       case Lexer.String.alexScan i0 Lexer.String.string_multi_content of
