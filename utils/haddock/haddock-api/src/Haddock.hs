@@ -271,7 +271,7 @@ haddockWithGhc ghc args = handleTopExceptions $ do
           }
 
       -- Render the interfaces.
-      liftIO $ renderStep dflags parserOpts logger unit_state flags sinceQual qual packages ifaces
+      liftIO $ renderStep dflags parserOpts logger unit_state flags sinceQual qual parGate packages ifaces
 
     -- If we were not given any input files, error if documentation was
     -- requested
@@ -284,7 +284,7 @@ haddockWithGhc ghc args = handleTopExceptions $ do
       packages <- liftIO $ readInterfaceFiles name_cache (readIfaceArgs flags) noChecks
 
       -- Render even though there are no input files (usually contents/index).
-      liftIO $ renderStep dflags parserOpts logger unit_state flags sinceQual qual packages []
+      liftIO $ renderStep dflags parserOpts logger unit_state flags sinceQual qual parGate packages []
 
 -- | Run the GHC action using a temporary output directory
 withTempOutputDir :: Ghc a -> Ghc a
@@ -344,10 +344,11 @@ renderStep
   -> [Flag]
   -> SinceQual
   -> QualOption
+  -> AbstractSem
   -> [(DocPaths, Visibility, FilePath, InterfaceFile)]
   -> [Interface]
   -> IO ()
-renderStep dflags parserOpts logger unit_state flags sinceQual nameQual pkgs interfaces = do
+renderStep dflags parserOpts logger unit_state flags sinceQual nameQual parGate pkgs interfaces = do
   updateHTMLXRefs (map (\(docPath, _ifaceFilePath, _showModules, ifaceFile) ->
                           ( case baseUrl flags of
                               Nothing  -> docPathsHtml docPath
@@ -363,7 +364,7 @@ renderStep dflags parserOpts logger unit_state flags sinceQual nameQual pkgs int
       (DocPaths {docPathsSources=Just path}, _, _, ifile) <- pkgs
       iface <- ifInstalledIfaces ifile
       return (instMod iface, path)
-  render dflags parserOpts logger unit_state flags sinceQual nameQual interfaces installedIfaces extSrcMap
+  render dflags parserOpts logger unit_state flags sinceQual nameQual parGate interfaces installedIfaces extSrcMap
   where
     -- get package name from unit-id
     packageName :: Unit -> String
@@ -381,11 +382,12 @@ render
   -> [Flag]
   -> SinceQual
   -> QualOption
+  -> AbstractSem
   -> [Interface]
   -> [(FilePath, PackageInterfaces)]
   -> Map Module FilePath
   -> IO ()
-render dflags parserOpts logger unit_state flags sinceQual qual ifaces packages extSrcMap = do
+render dflags parserOpts logger unit_state flags sinceQual qual parGate ifaces packages extSrcMap = do
   let
     packageInfo = PackageInfo { piPackageName    = fromMaybe (PackageName mempty)
                                                  $ optPackageName flags
