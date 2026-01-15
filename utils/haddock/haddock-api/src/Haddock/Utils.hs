@@ -357,7 +357,7 @@ html_xrefs' = unsafePerformIO (readIORef html_xrefs_ref')
 -- corresponds to the order of elements in the input list, not the chronological
 -- order in which exceptions occurred.
 mapConcurrently_ :: Int -> (a -> IO ()) -> [a] -> IO ()
-mapConcurrently_ _ [] = return ()
+mapConcurrently_ _ _ [] = return ()
 mapConcurrently_ maxThreads f xs
   | maxThreads <= 1 = mapM_ f xs
   | otherwise = do
