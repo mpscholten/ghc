@@ -85,17 +85,41 @@ import Haddock.Options
 import Haddock.Utils
 import Haddock.GhcUtils (modifySessionDynFlags, setOutputDir)
 import Haddock.Compat (getProcessID)
+import System.Semaphore (AbstractSem(..), SemaphoreName(..), openSemaphore, releaseSemaphore, waitOnSemaphore)
 
 --------------------------------------------------------------------------------
 -- * Exception handling
 --------------------------------------------------------------------------------
 
-parLimitFromFlags :: [Flag] -> IO Int
-parLimitFromFlags flags =
-  case optParCount flags of
-    Nothing       -> pure 1
-    Just Nothing  -> getNumProcessors
-    Just (Just n) -> pure (max 1 n)
+parGateChoiceFromFlags :: [Flag] -> Maybe (Either FilePath (Maybe Int))
+parGateChoiceFromFlags =
+  List.foldl' step Nothing
+  where
+    step _ (Flag_ParCount n) = Just (Right n)
+    step _ (Flag_ParSemaphore sem) = Just (Left sem)
+    step acc _ = acc
+
+parGateFromChoice :: Maybe (Either FilePath (Maybe Int)) -> IO AbstractSem
+parGateFromChoice choice =
+  case choice of
+    Nothing -> newBoundedSem 1
+    Just (Right Nothing) -> newBoundedSem =<< getNumProcessors
+    Just (Right (Just n)) -> newBoundedSem n
+    Just (Left semName) -> do
+      sem <- openSemaphore (SemaphoreName semName)
+      pure
+        AbstractSem
+          { acquireSem = waitOnSemaphore sem
+          , releaseSem = releaseSemaphore sem 1
+          }
+
+injectParFlags :: Maybe (Either FilePath (Maybe Int)) -> [Flag] -> [Flag]
+injectParFlags choice flags =
+  case choice of
+    Nothing -> flags
+    Just (Right Nothing) -> Flag_OptGhc "-j" : flags
+    Just (Right (Just n)) -> Flag_OptGhc ("-j" ++ show n) : flags
+    Just (Left sem) -> Flag_OptGhc "-jsem" : Flag_OptGhc sem : flags
 
 
 handleTopExceptions :: IO a -> IO a
@@ -185,13 +209,12 @@ haddockWithGhc ghc args = handleTopExceptions $ do
           Just "YES" | not noCompilation -> return $ Flag_OptGhc "-dynamic-too" : flags
           _ -> return flags
 
-  -- Inject `-j` into ghc options, if given to Haddock
-  flags' <- pure $ case optParCount flags'' of
-    Nothing       -> flags''
-    Just Nothing  -> Flag_OptGhc "-j" : flags''
-    Just (Just n) -> Flag_OptGhc ("-j" ++ show n) : flags''
+  let parChoice = parGateChoiceFromFlags flags''
 
-  parLimit <- parLimitFromFlags flags''
+  -- Inject parallelism flags into ghc options, if given to Haddock
+  flags' <- pure $ injectParFlags parChoice flags''
+
+  parGate <- parGateFromChoice parChoice
 
   -- Whether or not to bypass the interface version check
   let noChecks = Flag_BypassInterfaceVersonCheck `elem` flags
@@ -526,7 +549,7 @@ render dflags parserOpts logger unit_state flags sinceQual qual ifaces packages 
                   prologue
                   themes opt_mathjax sourceUrls' opt_wiki_urls opt_base_url
                   opt_contents_url opt_index_url unicode sincePkg packageInfo
-                  qual pretty parLimit withQuickjump
+                  qual pretty parGate withQuickjump
       return ()
     unless (withBaseURL || isJust (optOneShot flags)) $ do
       copyHtmlBits odir libDir themes withQuickjump
@@ -565,7 +588,7 @@ render dflags parserOpts logger unit_state flags sinceQual qual ifaces packages 
   when (Flag_HyperlinkedSource `elem` flags && not (null ifaces)) $ do
     withTiming logger "ppHyperlinkedSource" (const ()) $ do
       _ <- {-# SCC ppHyperlinkedSource #-}
-           ppHyperlinkedSource (verbosity flags) (isJust (optOneShot flags)) odir libDir opt_source_css pretty parLimit srcMap ifaces
+           ppHyperlinkedSource (verbosity flags) (isJust (optOneShot flags)) odir libDir opt_source_css pretty parGate srcMap ifaces
       return ()
 
 

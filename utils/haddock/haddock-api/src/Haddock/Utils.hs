@@ -56,6 +56,8 @@ module Haddock.Utils
 
     -- * Concurrency utilities
   , mapConcurrently_
+  , mapConcurrentlyWith_
+  , newBoundedSem
 
     -- * Logging
   , parseVerbosity
@@ -356,15 +358,15 @@ html_xrefs' = unsafePerformIO (readIORef html_xrefs_ref')
 -- order in which exceptions occurred.
 mapConcurrently_ :: Int -> (a -> IO ()) -> [a] -> IO ()
 mapConcurrently_ _ [] = return ()
-mapConcurrently_ maxThreads f xs = do
-  let threadLimit = max 1 maxThreads
-  sem <- newQSem threadLimit
-  let
-    gate =
-      AbstractSem
-        { acquireSem = waitQSem sem
-        , releaseSem = signalQSem sem
-        }
+mapConcurrently_ maxThreads f xs
+  | maxThreads <= 1 = mapM_ f xs
+  | otherwise = do
+      gate <- newBoundedSem maxThreads
+      mapConcurrentlyWith_ gate f xs
+
+mapConcurrentlyWith_ :: AbstractSem -> (a -> IO ()) -> [a] -> IO ()
+mapConcurrentlyWith_ _ _ [] = return ()
+mapConcurrentlyWith_ gate f xs = do
   -- Create MVars to wait for completion and collect results
   resultMVars <- mapM (const newEmptyMVar) xs
 
@@ -379,11 +381,20 @@ mapConcurrently_ maxThreads f xs = do
     (err:_) -> throwIO err
     [] -> return ()
   where
-    forkThread gate (x, resultMVar) = do
-      acquireSem gate
+    forkThread gate' (x, resultMVar) = do
+      acquireSem gate'
       void $ forkFinally (f x) $ \res -> do
-        releaseSem gate
+        releaseSem gate'
         putMVar resultMVar res
+
+newBoundedSem :: Int -> IO AbstractSem
+newBoundedSem maxThreads = do
+  sem <- newQSem (max 1 maxThreads)
+  pure
+    AbstractSem
+      { acquireSem = waitQSem sem
+      , releaseSem = signalQSem sem
+      }
 
 
 -----------------------------------------------------------------------------
