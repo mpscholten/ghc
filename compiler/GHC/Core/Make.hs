@@ -90,7 +90,6 @@ import Data.Char        ( ord )
 
 import qualified Data.ByteString as BS
 import Data.ByteString (ByteString)
-import qualified Data.ByteString.Char8 as BSC
 
 infixl 4 `mkCoreApp`, `mkCoreApps`
 
@@ -1345,4 +1344,3 @@ mkRuntimeErrorTy torc = mkSpecForAllTys [runtimeRep1TyVar, tyvar] $
     kind = case torc of
               TypeLike       -> mkTYPEapp       runtimeRep1Ty
               ConstraintLike -> mkCONSTRAINTapp runtimeRep1Ty
-

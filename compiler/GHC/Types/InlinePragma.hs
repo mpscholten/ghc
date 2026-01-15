@@ -111,7 +111,6 @@ module GHC.Types.InlinePragma
 
 import GHC.Prelude
 
-import GHC.Data.FastString
 import GHC.Hs.Extension
 import GHC.Types.Arity (Arity)
 import GHC.Types.SourceText (SourceText(..))

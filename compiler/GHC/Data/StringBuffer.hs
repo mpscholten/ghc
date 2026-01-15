@@ -399,7 +399,7 @@ lexemeToByteString :: StringBuffer
                    -> Int               -- ^ @n@, the number of bytes
                    -> BS.ByteString
 lexemeToByteString _ 0 = BS.empty
-lexemeToByteString (StringBuffer fp bufLen cur) n =
+lexemeToByteString (StringBuffer fp _ cur) n =
     BSI.fromForeignPtr fp cur n
 
 -- | Return the previous @n@ characters (or fewer if we are less than @n@

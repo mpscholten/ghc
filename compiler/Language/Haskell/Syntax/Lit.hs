@@ -17,8 +17,6 @@ import Language.Haskell.Syntax.Extension
 
 import GHC.Types.SourceText (IntegralLit, FractionalLit, SourceText)
 
-import GHC.Data.FastString (FastString, lexicalCompareFS)
-
 import Data.ByteString (ByteString)
 import Data.Data hiding ( Fixity )
 import Data.Bool

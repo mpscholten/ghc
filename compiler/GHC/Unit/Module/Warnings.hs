@@ -41,7 +41,7 @@ where
 
 import GHC.Prelude
 
-import GHC.Data.FastString (FastString, mkFastString, unpackFS)
+import GHC.Data.FastString (mkFastString, unpackFS)
 import GHC.Utils.Encoding (utf8DecodeByteString)
 import GHC.Types.SourceText
 import GHC.Types.Name.Occurrence
