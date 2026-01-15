@@ -41,7 +41,8 @@ where
 
 import GHC.Prelude
 
-import GHC.Data.FastString (mkFastString, unpackFS)
+import GHC.Data.FastString (FastString, mkFastString, unpackFS)
+import GHC.Utils.Encoding (utf8DecodeByteString)
 import GHC.Types.SourceText
 import GHC.Types.Name.Occurrence
 import GHC.Types.Name.Env
@@ -191,14 +192,14 @@ instance Outputable (WarningTxt (GhcPass pass)) where
     ppr (WarningTxt lsrc mcat ws)
       = case lsrc of
             NoSourceText   -> pp_ws ws
-            SourceText src -> ftext src <+> ctg_doc <+> pp_ws ws <+> text "#-}"
+            SourceText src -> text (utf8DecodeByteString src) <+> ctg_doc <+> pp_ws ws <+> text "#-}"
         where
           ctg_doc = maybe empty (\ctg -> ppr ctg) mcat
 
     ppr (DeprecatedTxt lsrc ds)
       = case lsrc of
           NoSourceText   -> pp_ws ds
-          SourceText src -> ftext src <+> pp_ws ds <+> text "#-}"
+          SourceText src -> text (utf8DecodeByteString src) <+> pp_ws ds <+> text "#-}"
 
 pp_ws :: [LocatedE (WithHsDocIdentifiers StringLiteral pass)] -> SDoc
 pp_ws [l] = ppr $ unLoc l
@@ -210,10 +211,10 @@ pp_ws ws
 
 pprWarningTxtForMsg :: WarningTxt (GhcPass pass) -> SDoc
 pprWarningTxtForMsg (WarningTxt _ _ ws)
-                     = doubleQuotes (vcat (map (ftext . sl_fs . hsDocString . unLoc) ws))
+                     = doubleQuotes (vcat (map (text . utf8DecodeByteString . sl_fs . hsDocString . unLoc) ws))
 pprWarningTxtForMsg (DeprecatedTxt _ ds)
                      = text "Deprecated:" <+>
-                       doubleQuotes (vcat (map (ftext . sl_fs . hsDocString . unLoc) ds))
+                       doubleQuotes (vcat (map (text . utf8DecodeByteString . sl_fs . hsDocString . unLoc) ds))
 
 
 -- | Warning information from a module

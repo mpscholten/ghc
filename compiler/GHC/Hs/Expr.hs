@@ -51,6 +51,7 @@ import GHC.Utils.Misc
 import GHC.Utils.Outputable
 import GHC.Utils.Panic
 import GHC.Data.FastString
+import GHC.Utils.Encoding (utf8EncodeByteString)
 import GHC.Core.Type
 import GHC.Builtin.Types (mkTupleStr)
 import GHC.Tc.Utils.TcType (TcType)
@@ -121,7 +122,7 @@ data SyntaxExprTc = SyntaxExprTc { syn_expr      :: HsExpr GhcTc
 -- | This is used for rebindable-syntax pieces that are too polymorphic
 -- for tcSyntaxOp (trS_fmap and the mzip in ParStmt)
 noExpr :: HsExpr (GhcPass p)
-noExpr = HsLit noExtField (HsString (SourceText $ fsLit "noExpr") (fsLit "noExpr"))
+noExpr = HsLit noExtField (HsString (SourceText $ utf8EncodeByteString "noExpr") (utf8EncodeByteString "noExpr"))
 
 noSyntaxExpr :: forall p. IsPass p => SyntaxExpr (GhcPass p)
                               -- Before renaming, and sometimes after
@@ -910,7 +911,7 @@ ppr_expr (HsOverLabel s l) = case ghcPass @p of
     where helper s =
             char '#' <> case s of
                           NoSourceText -> ppr l
-                          SourceText src -> ftext src
+                          SourceText src -> bstext src
 ppr_expr (HsPragE _ prag e)  = sep [ppr prag, ppr_lexpr e]
 
 ppr_expr (OpApp _ e1 op e2)
@@ -1331,7 +1332,7 @@ instance Outputable (HsPragE (GhcPass p)) where
     pprWithSourceText st (text "{-# SCC")
      -- no doublequotes if stl empty, for the case where the SCC was written
      -- without quotes.
-    <+> pprWithSourceText stl (ftext lbl) <+> text "#-}"
+    <+> pprWithSourceText stl (bstext lbl) <+> text "#-}"
 
 
 {- *********************************************************************

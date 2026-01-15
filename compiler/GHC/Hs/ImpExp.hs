@@ -40,7 +40,7 @@ import GHC.Unit.Module.Warnings
 import Data.Data
 import Data.Maybe
 import GHC.Hs.Doc (LHsDoc)
-
+import GHC.Utils.Encoding (utf8DecodeByteString)
 
 {-
 ************************************************************************
@@ -196,7 +196,7 @@ instance (OutputableBndrId p
                                 GhcTc -> dataConCantHappen ext
             in case mSrcText of
                   NoSourceText   -> text "{-# SOURCE #-}"
-                  SourceText src -> ftext src <+> text "#-}"
+                  SourceText src -> text (utf8DecodeByteString src) <+> text "#-}"
         ppr_imp _ NotBoot = empty
 
         pp_spec Nothing             = empty

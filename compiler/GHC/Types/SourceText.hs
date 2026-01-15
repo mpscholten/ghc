@@ -29,12 +29,14 @@ where
 
 import GHC.Prelude
 
-import GHC.Data.FastString
+import GHC.Utils.Encoding
 
 import GHC.Utils.Outputable
 import GHC.Utils.Binary
 import GHC.Utils.Panic
 
+import Data.ByteString (ByteString)
+import qualified Data.ByteString as BS
 import Data.Function (on)
 import Data.Data
 import GHC.Real ( Ratio(..) )
@@ -97,7 +99,7 @@ For OverLitVal
 
  -- Note [Literal source text],[Pragma source text]
 data SourceText
-   = SourceText FastString
+   = SourceText ByteString
    | NoSourceText
       -- ^ For when code is generated, e.g. TH,
       -- deriving. The pretty printer will then make
@@ -105,7 +107,7 @@ data SourceText
    deriving (Data, Show, Eq )
 
 instance Outputable SourceText where
-  ppr (SourceText s) = text "SourceText" <+> ftext s
+  ppr (SourceText s) = text "SourceText" <+> text (utf8DecodeByteString s)
   ppr NoSourceText   = text "NoSourceText"
 
 instance NFData SourceText where
@@ -131,7 +133,7 @@ instance Binary SourceText where
 -- | Special combinator for showing string literals.
 pprWithSourceText :: SourceText -> SDoc -> SDoc
 pprWithSourceText NoSourceText     d = d
-pprWithSourceText (SourceText src) _ = ftext src
+pprWithSourceText (SourceText src) _ = text (utf8DecodeByteString src)
 
 ------------------------------------------------
 -- Literals
@@ -150,7 +152,7 @@ data IntegralLit = IL
    deriving (Data, Show)
 
 mkIntegralLit :: Integral a => a -> IntegralLit
-mkIntegralLit i = IL { il_text = SourceText (fsLit $ show i_integer)
+mkIntegralLit i = IL { il_text = SourceText (utf8EncodeByteString $ show i_integer)
                      , il_neg = i < 0
                      , il_value = i_integer }
   where
@@ -160,9 +162,11 @@ mkIntegralLit i = IL { il_text = SourceText (fsLit $ show i_integer)
 negateIntegralLit :: IntegralLit -> IntegralLit
 negateIntegralLit (IL text neg value)
   = case text of
-      SourceText (unconsFS -> Just ('-',src)) -> IL (SourceText src)                False    (negate value)
-      SourceText src                          -> IL (SourceText ('-' `consFS` src)) True     (negate value)
-      NoSourceText                            -> IL NoSourceText          (not neg) (negate value)
+      SourceText src ->
+        case utf8UnconsByteString src of
+          Just ('-', rest) -> IL (SourceText rest) False (negate value)
+          _ -> IL (SourceText (BS.cons 0x2D src)) True (negate value) -- 0x2D is '-'
+      NoSourceText -> IL NoSourceText (not neg) (negate value)
 
 -- | Fractional Literal
 --
@@ -214,7 +218,7 @@ rationalFromFractionalLit (FL _ _ i e expBase) =
   mkRationalWithExponentBase i e expBase
 
 mkTHFractionalLit :: Rational -> FractionalLit
-mkTHFractionalLit r =  FL { fl_text = SourceText (fsLit $ show (realToFrac r::Double))
+mkTHFractionalLit r =  FL { fl_text = SourceText (utf8EncodeByteString $ show (realToFrac r::Double))
                              -- Converting to a Double here may technically lose
                              -- precision (see #15502). We could alternatively
                              -- convert to a Rational for the most accuracy, but
@@ -230,14 +234,15 @@ mkTHFractionalLit r =  FL { fl_text = SourceText (fsLit $ show (realToFrac r::Do
 negateFractionalLit :: FractionalLit -> FractionalLit
 negateFractionalLit (FL text neg i e eb)
   = case text of
-      SourceText (unconsFS -> Just ('-',src))
-                           -> FL (SourceText src)                False (negate i) e eb
-      SourceText      src  -> FL (SourceText ('-' `consFS` src)) True  (negate i) e eb
-      NoSourceText         -> FL NoSourceText (not neg) (negate i) e eb
+      SourceText src ->
+        case utf8UnconsByteString src of
+          Just ('-', rest) -> FL (SourceText rest) False (negate i) e eb
+          _ -> FL (SourceText (BS.cons 0x2D src)) True (negate i) e eb -- 0x2D is '-'
+      NoSourceText -> FL NoSourceText (not neg) (negate i) e eb
 
 -- | The integer should already be negated if it's negative.
 integralFractionalLit :: Bool -> Integer -> FractionalLit
-integralFractionalLit neg i = FL { fl_text = SourceText (fsLit $ show i)
+integralFractionalLit neg i = FL { fl_text = SourceText (utf8EncodeByteString $ show i)
                                  , fl_neg = neg
                                  , fl_signi = i :% 1
                                  , fl_exp = 0
@@ -247,7 +252,7 @@ integralFractionalLit neg i = FL { fl_text = SourceText (fsLit $ show i)
 mkSourceFractionalLit :: String -> Bool -> Integer -> Integer
                       -> FractionalExponentBase
                       -> FractionalLit
-mkSourceFractionalLit !str !b !r !i !ff = FL (SourceText $ fsLit str) b (r :% 1) i ff
+mkSourceFractionalLit !str !b !r !i !ff = FL (SourceText $ utf8EncodeByteString str) b (r :% 1) i ff
 
 {- Note [fractional exponent bases]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -267,7 +272,7 @@ instance Ord IntegralLit where
   compare = compare `on` il_value
 
 instance Outputable IntegralLit where
-  ppr (IL (SourceText src) _ _) = ftext src
+  ppr (IL (SourceText src) _ _) = text (utf8DecodeByteString src)
   ppr (IL NoSourceText _ value) = text (show value)
 
 
@@ -303,7 +308,7 @@ instance Outputable FractionalLit where
 data StringLiteral = StringLiteral
                        { sl_st :: SourceText, -- literal raw source.
                                               -- See Note [Literal source text]
-                         sl_fs :: FastString, -- literal string value
+                         sl_fs :: ByteString, -- literal string value
                          sl_tc :: Maybe NoCommentsLocation
                                                     -- Location of
                                                     -- possible
@@ -317,4 +322,4 @@ instance Eq StringLiteral where
   (StringLiteral _ a _) == (StringLiteral _ b _) = a == b
 
 instance Outputable StringLiteral where
-  ppr sl = pprWithSourceText (sl_st sl) (doubleQuotes $ ftext $ sl_fs sl)
+  ppr sl = pprWithSourceText (sl_st sl) (doubleQuotes $ text $ utf8DecodeByteString $ sl_fs sl)

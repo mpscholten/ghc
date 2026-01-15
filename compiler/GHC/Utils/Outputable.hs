@@ -160,6 +160,7 @@ import GHC.Fingerprint
 import GHC.Show         ( showMultiLineString )
 import GHC.Utils.Exception
 import GHC.Exts (oneShot)
+import GHC.Utils.Encoding (utf8DecodeByteString)
 
 {-
 ************************************************************************
@@ -1070,6 +1071,9 @@ instance Outputable FastString where
     ppr fs = ftext fs           -- Prints an unadorned string,
                                 -- no double quotes or anything
 
+instance Outputable ByteString where
+    ppr bs = text (utf8DecodeByteString bs)
+
 deriving newtype instance Outputable NonDetFastString
 deriving newtype instance Outputable LexicalFastString
 
@@ -1316,8 +1320,8 @@ pprHsChar c | c > '\x10ffff' = char '\\' <> text (show (fromIntegral (ord c) :: 
             | otherwise      = text (show c)
 
 -- | Special combinator for showing string literals.
-pprHsString :: FastString -> SDoc
-pprHsString fs = vcat (map text (showMultiLineString (unpackFS fs)))
+pprHsString :: ByteString -> SDoc
+pprHsString fs = vcat (map text (showMultiLineString (utf8DecodeByteString fs)))
 
 -- | Special combinator for showing bytestring literals.
 pprHsBytes :: ByteString -> SDoc
@@ -1875,6 +1879,9 @@ class IsOutput doc => IsLine doc where
   -- which type the result is instantiated to. This should generally be avoided;
   -- see Note [dualLine and dualDoc] for details.
   dualLine :: SDoc -> HLine -> doc
+
+  bstext :: ByteString -> doc
+  bstext s = text (utf8DecodeByteString s)
 
 
 -- | A class of types that represent a multiline document, with support for

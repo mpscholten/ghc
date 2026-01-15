@@ -5,6 +5,7 @@ import GHC.Types.SourceText
 import GHC.Unit.Types
 import GHC.Utils.Binary
 import GHC.Utils.Outputable
+import GHC.Utils.Encoding (utf8DecodeByteString)
 
 import Data.Data
 
@@ -28,7 +29,7 @@ instance Outputable RawPkgQual where
   ppr = \case
     NoRawPkgQual -> empty
     RawPkgQual (StringLiteral st p _)
-      -> pprWithSourceText st (doubleQuotes (ftext p))
+      -> pprWithSourceText st (doubleQuotes (text (utf8DecodeByteString p)))
 
 instance Outputable PkgQual where
   ppr = \case

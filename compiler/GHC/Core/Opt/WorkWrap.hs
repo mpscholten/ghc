@@ -20,7 +20,6 @@ import GHC.Core.Type
 import GHC.Core.Opt.WorkWrap.Utils
 import GHC.Core.SimpleOpt
 
-import GHC.Data.FastString
 
 import GHC.Hs.Extension (GhcPass, GhcTc)
 
@@ -34,6 +33,7 @@ import GHC.Types.Demand
 import GHC.Types.Cpr
 import GHC.Types.SourceText
 import GHC.Types.Unique
+import GHC.Utils.Encoding (utf8EncodeByteString)
 
 import GHC.Utils.Misc
 import GHC.Utils.Outputable
@@ -833,7 +833,7 @@ mkWWBindPair ww_opts fn_id fn_info fn_args fn_body work_uniq div
                    NoInline -> inl_act fn_inl_prag
                    _        -> inl_act wrap_prag
 
-    srcTxt = SourceText $ fsLit "{-# INLINE"
+    srcTxt = SourceText $ utf8EncodeByteString "{-# INLINE"
     work_prag = InlinePragma { inl_ext = XInlinePragmaGhc srcTxt AnySaturation
                              , inl_inline = fn_inline_spec
                              , inl_act    = work_act
@@ -911,7 +911,7 @@ mkStrWrapperInlinePrag (InlinePragma { inl_inline = fn_inl
 
                  , inl_rule   = rule_info }  -- RuleMatchInfo is (and must be) unaffected
   where
-    srcTxt = SourceText $ fsLit "{-# INLINE"
+    srcTxt = SourceText $ utf8EncodeByteString "{-# INLINE"
     -- See Note [Wrapper activation]
     wrapper_phase = foldr (laterPhase . get_rule_phase) earliest_inline_phase rules
     earliest_inline_phase = beginPhase fn_act `laterPhase` nextPhase InitialPhase

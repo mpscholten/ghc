@@ -406,7 +406,7 @@ mkQuasiQuoteExpr flavour quoter (L q_span' quote)
   where
     q_span = noAnnSrcSpan (locA q_span')
     quoterExpr = L (l2l quoter) $! mkHsVar          $! quoter
-    quoteExpr  = L q_span $! HsLit noExtField $! HsString NoSourceText quote
+    quoteExpr  = L q_span $! HsLit noExtField $! HsString NoSourceText (bytesFS quote)
     quote_selector = case flavour of
                        UntypedExpSplice  -> quoteExpName
                        UntypedPatSplice  -> quotePatName

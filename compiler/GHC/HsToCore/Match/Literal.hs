@@ -69,6 +69,9 @@ import Data.Int
 import Data.List.NonEmpty (NonEmpty(..))
 import Data.Word
 import GHC.Real ( Ratio(..), numerator, denominator )
+import qualified Data.ByteString as BS
+import Data.ByteString (ByteString)
+import GHC.Utils.Encoding.UTF8 (utf8DecodeByteString)
 
 {-
 ************************************************************************
@@ -116,8 +119,8 @@ dsLit l = do
     HsFloatPrim  _ fl -> return (Lit (LitFloat (rationalFromFractionalLit fl)))
     HsDoublePrim _ fl -> return (Lit (LitDouble (rationalFromFractionalLit fl)))
     HsChar _ c       -> return (mkCharExpr c)
-    HsString _ str   -> mkStringExprFS str
-    HsMultilineString _ str -> mkStringExprFS str
+    HsString _ str   -> mkStringExprBS str
+    HsMultilineString _ str -> mkStringExprBS str
     HsInt _ i        -> return (mkIntExpr platform (il_value i))
     XLit x           -> case ghcPass @p of
       GhcTc          -> case x of
@@ -528,10 +531,10 @@ tidyLitPat :: HsLit GhcTc -> Pat GhcTc
 --  * We get rid of HsChar right here
 tidyLitPat (HsChar src c) = unLoc (mkCharLitPat src c)
 tidyLitPat (HsString src s)
-  | lengthFS s <= 1     -- Short string literals only
+  | BS.length s <= 1     -- Short string literals only
   = unLoc $ foldr (\c pat -> mkPrefixConPat consDataCon
                                              [mkCharLitPat src c, pat] [charTy])
-                  (mkNilPat charTy) (unpackFS s)
+                  (mkNilPat charTy) (utf8DecodeByteString s)
         -- The stringTy is the type of the whole pattern, not
         -- the type to instantiate (:) or [] with!
 tidyLitPat lit = LitPat noExtField lit
@@ -578,7 +581,7 @@ tidyNPat (OverLit (OverLitTc False _ ty) val) mb_neg _eq outer_ty
                    (Just _,  HsIntegral i) -> Just (-(il_value i))
                    _ -> Nothing
 
-    mb_str_lit :: Maybe FastString
+    mb_str_lit :: Maybe ByteString
     mb_str_lit = case (mb_neg, val) of
                    (Nothing, HsIsString _ s) -> Just s
                    _ -> Nothing
@@ -627,8 +630,7 @@ matchLiterals (var :| vars) ty sub_groups
     wrap_str_guard eq_str (LitString s, mr)
         = do { -- We now have to convert back to FastString. Perhaps there
                -- should be separate LitBytes and LitString constructors?
-               let s'  = mkFastStringByteString s
-             ; lit    <- mkStringExprFS s'
+             ; lit    <- mkStringExprBS s
              ; let pred = mkApps (Var eq_str) [Var var, lit]
              ; return (mkGuardedMatchResult pred mr) }
     wrap_str_guard _ (l, _) = pprPanic "matchLiterals/wrap_str_guard" (ppr l)
@@ -660,7 +662,7 @@ hsLitKey _        (HsCharPrim   _ c)  = mkLitChar            c
 hsLitKey _        (HsFloatPrim  _ fl) = mkLitFloat (rationalFromFractionalLit fl)
 hsLitKey _        (HsDoublePrim _ fl) = mkLitDouble (rationalFromFractionalLit fl)
 
-hsLitKey _        (HsString _ s)      = LitString (bytesFS s)
+hsLitKey _        (HsString _ s)      = LitString s
 hsLitKey _        l                   = pprPanic "hsLitKey" (ppr l)
 
 {-

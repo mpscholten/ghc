@@ -70,7 +70,7 @@ module GHC.Utils.Ppr (
         -- * Constructing documents
 
         -- ** Converting values into documents
-        char, text, ftext, ptext, ztext, sizedText, zeroWidthText, emptyText,
+        char, text, ftext, bstext, ptext, ztext, sizedText, zeroWidthText, emptyText,
         int, integer, float, double, rational, hex,
 
         -- ** Simple derived documents
@@ -123,6 +123,8 @@ import Numeric (showHex)
 --for a RULES
 import GHC.Base ( unpackCString#, unpackNBytes#, Int(..) )
 import GHC.Ptr  ( Ptr(..) )
+import Data.ByteString (ByteString)
+import GHC.Utils.Encoding (utf8DecodeByteString)
 
 -- ---------------------------------------------------------------------------
 -- The Doc calculus
@@ -318,6 +320,9 @@ text s = textBeside_ (Str s) (length s) Empty
 
 ftext :: FastString -> Doc
 ftext s = textBeside_ (PStr s) (lengthFS s) Empty
+
+bstext :: ByteString -> Doc
+bstext s = text (utf8DecodeByteString s)
 
 ptext :: PtrString -> Doc
 ptext s = textBeside_ (LStr s) (lengthPS s) Empty
