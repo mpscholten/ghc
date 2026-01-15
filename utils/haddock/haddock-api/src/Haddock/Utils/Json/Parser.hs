@@ -6,14 +6,14 @@ module Haddock.Utils.Json.Parser
 
 import Control.Applicative (Alternative (..))
 import Control.Monad (MonadPlus (..))
-import qualified Data.ByteString.Lazy.Char8 as BSCL
 import Data.Char (isHexDigit)
 import Data.Functor (($>))
 import qualified Data.List as List
 import Data.Text (Text)
 import qualified Data.Text as T
-import Numeric
-import Text.Parsec.ByteString.Lazy (Parser)
+import qualified Data.Text.Read as TR
+import Numeric (readHex)
+import Text.Parsec.Text (Parser)
 import Text.ParserCombinators.Parsec ((<?>))
 import qualified Text.ParserCombinators.Parsec as Parsec
 import Prelude hiding (null)
@@ -127,7 +127,7 @@ parseObject =
 
 parseNumber :: Parser Double
 parseNumber = tok $ do
-  s <- BSCL.unpack <$> Parsec.getInput
-  case readSigned readFloat s of
-    [(n, s')] -> Parsec.setInput (BSCL.pack s') $> n
-    _ -> mzero
+  s <- Parsec.getInput
+  case TR.signed TR.double s of
+    Right (n, s') -> Parsec.setInput s' $> n
+    Left _ -> mzero

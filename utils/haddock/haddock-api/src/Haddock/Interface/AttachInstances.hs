@@ -31,6 +31,7 @@ import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, mapMaybe, maybeToList)
 import Data.Ord (comparing)
 import qualified Data.Sequence as Seq
+import qualified Data.Text as T
 import GHC
 import GHC.Builtin.Types (unrestrictedFunTyConName)
 import GHC.Core (isOrphan)
@@ -369,7 +370,7 @@ simplify (TyConApp tc ts) =
     (SName (tyConName tc))
     (mapMaybe simplify_maybe ts)
 simplify (LitTy (NumTyLit n)) = SimpleIntTyLit n
-simplify (LitTy (StrTyLit s)) = SimpleStringTyLit (unpackFS s)
+simplify (LitTy (StrTyLit s)) = SimpleStringTyLit (T.pack (unpackFS s))
 simplify (LitTy (CharTyLit c)) = SimpleCharTyLit c
 simplify (CastTy ty _) = simplify ty
 simplify (CoercionTy _) = error "simplify:Coercion"

@@ -12,7 +12,6 @@ module Haddock.Utils.Json
   , object
   , Pair
   , (.=)
-  , encodeToString
   , encodeToBuilder
   , ToJSON (toJSON)
   , Parser (..)
@@ -51,9 +50,10 @@ import Data.Monoid
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
+import qualified Data.Text.Lazy as TL
+import qualified Data.Text.Lazy.Encoding as TL
 import Data.Word
 import GHC.Natural
-import qualified Text.Parsec.ByteString.Lazy as Parsec.Lazy
 import qualified Text.ParserCombinators.Parsec as Parsec
 
 import Haddock.Utils.Json.Parser
@@ -123,6 +123,9 @@ instance ToJSON Word64 where toJSON = Number . realToFrac
 -- | Possibly lossy due to conversion to 'Double'
 instance ToJSON Integer where toJSON = Number . fromInteger
 
+instance ToJSON Builder where
+  toJSON = String . T.decodeUtf8Lenient . BSL.toStrict . BB.toLazyByteString
+
 ------------------------------------------------------------------------------
 -- 'BB.Builder'-based encoding
 
@@ -160,13 +163,6 @@ encodeStringBB :: Text -> Builder
 encodeStringBB str = BB.char8 '"' <> go str <> BB.char8 '"'
   where
     go = BB.byteString . T.encodeUtf8 . escapeText
-
-------------------------------------------------------------------------------
--- 'String'-based encoding
-
--- | Serialise value as JSON-encoded Unicode 'String'
-encodeToString :: ToJSON a => a -> String
-encodeToString = T.unpack . T.decodeUtf8 . BSL.toStrict . BB.toLazyByteString . encodeToBuilder
 
 ------------------------------------------------------------------------------
 -- helpers
@@ -342,6 +338,10 @@ instance FromJSON Text where
   parseJSON (String s) = pure s
   parseJSON v = typeMismatch "Text" v
 
+instance FromJSON Builder where
+  parseJSON (String s) = pure $ BB.byteString (T.encodeUtf8 s)
+  parseJSON v = typeMismatch "Builder" v
+
 instance FromJSON Char where
   parseJSON = withString "Char" parseChar
 
@@ -349,10 +349,11 @@ instance FromJSON Char where
   parseJSONList v = typeMismatch "String" v
 
 parseChar :: Text -> Parser Char
-parseChar s = case T.unpack s of
-  [c] -> pure c
-  [] -> prependContext "Char" $ fail "expected a string of length 1, got an empty string"
-  (_ : _) -> prependContext "Char" $ fail "expected a string of length 1, got a longer string"
+parseChar s = case T.uncons s of
+  Nothing -> prependContext "Char" $ fail "expected a string of length 1, got an empty string"
+  Just (c, rest)
+    | T.null rest -> pure c
+    | otherwise -> prependContext "Char" $ fail "expected a string of length 1, got a longer string"
 
 parseRealFloat :: RealFloat a => String -> Value -> Parser a
 parseRealFloat _ (Number s) = pure $ realToFrac s
@@ -460,9 +461,9 @@ formatRelativePath path = format "" path
       | otherwise = "['" ++ escapeKey key ++ "']"
 
     isIdentifierKey :: Text -> Bool
-    isIdentifierKey t = case T.unpack t of
-      [] -> False
-      (x : xs) -> isAlpha x && all isAlphaNum xs
+    isIdentifierKey t = case T.uncons t of
+      Nothing -> False
+      Just (x, xs) -> isAlpha x && T.all isAlphaNum xs
 
     escapeKey :: Text -> String
     escapeKey = concatMap escapeChar . T.unpack
@@ -492,44 +493,40 @@ explicitParseFieldMaybe p obj key =
 
 decodeWith :: (Value -> Result a) -> BSL.ByteString -> Maybe a
 decodeWith decoder bsl =
-  case Parsec.parse parseJSONValue "<input>" bsl of
+  case TL.decodeUtf8' bsl of
     Left _ -> Nothing
-    Right json ->
-      case decoder json of
-        Success a -> Just a
-        Error _ -> Nothing
+    Right txt ->
+      case Parsec.parse parseJSONValue "<input>" (TL.toStrict txt) of
+        Left _ -> Nothing
+        Right json ->
+          case decoder json of
+            Success a -> Just a
+            Error _ -> Nothing
 
 decode :: FromJSON a => BSL.ByteString -> Maybe a
 decode = decodeWith fromJSON
 
 eitherDecodeWith :: (Value -> Result a) -> BSL.ByteString -> Either String a
 eitherDecodeWith decoder bsl =
-  case Parsec.parse parseJSONValue "<input>" bsl of
-    Left parsecError -> Left (show parsecError)
-    Right json ->
-      case decoder json of
-        Success a -> Right a
-        Error err -> Left err
+  case TL.decodeUtf8' bsl of
+    Left err -> Left (show err)
+    Right txt ->
+      case Parsec.parse parseJSONValue "<input>" (TL.toStrict txt) of
+        Left parsecError -> Left (show parsecError)
+        Right json ->
+          case decoder json of
+            Success a -> Right a
+            Error err -> Left err
 
 eitherDecode :: FromJSON a => BSL.ByteString -> Either String a
 eitherDecode = eitherDecodeWith fromJSON
 
 decodeFile :: FromJSON a => FilePath -> IO (Maybe a)
 decodeFile filePath = do
-  parsecResult <- Parsec.Lazy.parseFromFile parseJSONValue filePath
-  case parsecResult of
-    Right r ->
-      case fromJSON r of
-        Success a -> return (Just a)
-        Error _ -> return Nothing
-    Left _ -> return Nothing
+  bsl <- BSL.readFile filePath
+  pure (decodeWith fromJSON bsl)
 
 eitherDecodeFile :: FromJSON a => FilePath -> IO (Either String a)
 eitherDecodeFile filePath = do
-  parsecResult <- Parsec.Lazy.parseFromFile parseJSONValue filePath
-  case parsecResult of
-    Right r ->
-      case fromJSON r of
-        Success a -> return (Right a)
-        Error err -> return (Left err)
-    Left err -> return $ Left (show err)
+  bsl <- BSL.readFile filePath
+  pure (eitherDecodeWith fromJSON bsl)

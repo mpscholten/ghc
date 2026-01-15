@@ -54,6 +54,8 @@ import qualified GHC.Paths as GhcPaths
 import Paths_haddock_api (getDataDir)
 #endif
 import System.Directory (doesDirectoryExist, getTemporaryDirectory)
+import qualified Data.Text as T
+import qualified Data.Text.IO as T
 import Text.ParserCombinators.ReadP (readP_to_S)
 import GHC hiding (verbosity)
 import GHC.Settings.Config
@@ -407,7 +409,7 @@ render dflags parserOpts logger unit_state flags sinceQual qual ifaces packages 
     pkgNameVer       = modulePackageInfo unit_state flags pkgMod
     pkgName          = fmap (unpackFS . (\(PackageName n) -> n)) (fst pkgNameVer)
     sincePkg         = case sinceQual of
-                         External -> pkgName
+                         External -> fmap T.pack pkgName
                          Always -> Nothing
 
     (srcBase, srcModule, srcEntity, srcLEntity) = sourceUrls flags
@@ -644,7 +646,7 @@ withGhc' libDir needHieFiles flags ghcActs = runGhc (Just libDir) $ do
 
       (dynflags'', rest, _) <- parseDynamicFlags logger dynflags' (map noLoc flags')
       if not (null rest)
-        then throwE ("Couldn't parse GHC options: " ++ unwords flags')
+        then throwE (T.pack ("Couldn't parse GHC options: " ++ unwords flags'))
         else return dynflags''
 
 unsetPatternMatchWarnings :: DynFlags -> DynFlags
@@ -834,12 +836,11 @@ getPrologue parserOpts flags =
     [filename] -> do
       h <- openFile filename ReadMode
       hSetEncoding h utf8
-      str <- hGetContents h -- semi-closes the handle
+      str <- T.hGetContents h -- semi-closes the handle
       return . Just $! second (fmap rdrName) $ parseParas parserOpts Nothing str
     _ -> throwE "multiple -p/--prologue options"
 
 
 rightOrThrowE :: Either String b -> IO b
-rightOrThrowE (Left msg) = throwE msg
+rightOrThrowE (Left msg) = throwE (T.pack msg)
 rightOrThrowE (Right x) = pure x
-
