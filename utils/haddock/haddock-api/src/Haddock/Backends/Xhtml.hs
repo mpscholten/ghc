@@ -41,6 +41,7 @@ import qualified Data.Map.Strict as Map
 import Data.Maybe
 import Data.Ord (comparing)
 import qualified Data.Set as Set hiding (Set)
+import qualified Data.Text as T
 import GHC hiding (LexicalFixity (..), NoLink, moduleInfo)
 import GHC.Types.Name
 import GHC.Unit.State
@@ -566,10 +567,10 @@ mkNode pkg qual ss p (Node s leaf _pkg srcPkg short ts) =
 --------------------------------------------------------------------------------
 
 data JsonIndexEntry = JsonIndexEntry
-  { jieHtmlFragment :: String
-  , jieName :: String
-  , jieModule :: String
-  , jieLink :: String
+  { jieHtmlFragment :: Builder.Builder
+  , jieName :: Text
+  , jieModule :: Text
+  , jieLink :: Text
   }
   deriving (Show)
 
@@ -582,10 +583,10 @@ instance ToJSON JsonIndexEntry where
       , jieLink
       } =
       Object
-        [ "display_html" .= String jieHtmlFragment
-        , "name" .= String jieName
-        , "module" .= String jieModule
-        , "link" .= String jieLink
+        [ "display_html" .= jieHtmlFragment
+        , "name" .= jieName
+        , "module" .= jieModule
+        , "link" .= jieLink
         ]
 
 instance FromJSON JsonIndexEntry where
@@ -654,10 +655,10 @@ ppJsonIndex odir maybe_source_url maybe_wiki_url unicode pkg qual_opt ifaces ins
       | Just item_html <- processExport True links_info unicode pkg qual item =
           Just
             JsonIndexEntry
-              { jieHtmlFragment = Text.unpack (Text.decodeUtf8Lenient (LBS.toStrict (Builder.toLazyByteString (showHtmlFragment item_html))))
-              , jieName = unwords (map getOccString names)
-              , jieModule = moduleString mdl
-              , jieLink = LText.unpack $ fromMaybe "" (listToMaybe (map (nameLink mdl) names))
+              { jieHtmlFragment = showHtmlFragment item_html
+              , jieName = T.unwords (map getOccText names)
+              , jieModule = moduleText mdl
+              , jieLink = LText.toStrict $ fromMaybe "" (listToMaybe (map (nameLink mdl) names))
               }
       | otherwise = Nothing
       where
@@ -1063,7 +1064,7 @@ numberSectionHeadings = go 1
     go n (other : es) =
       other : go n es
 
-    collectAnchors :: DocH (Wrap (ModuleName, OccName)) (Wrap DocName) -> [String]
+    collectAnchors :: DocH (Wrap (ModuleName, OccName)) (Wrap DocName) -> [T.Text]
     collectAnchors (DocAppend a b) = collectAnchors a ++ collectAnchors b
     collectAnchors (DocAName a) = [a]
     collectAnchors _ = []

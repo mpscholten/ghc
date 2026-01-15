@@ -97,6 +97,7 @@ library
                , filepath
                , ghc-boot
                , mtl
+               , text
                , transformers
                , text
 

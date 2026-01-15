@@ -28,6 +28,7 @@ import Data.Char
 import Data.Foldable (toList)
 import Data.List (intercalate, isPrefixOf)
 import Data.Maybe
+import qualified Data.Text as T
 import Data.Version
 import GHC
 import GHC.Core.InstEnv
@@ -82,7 +83,7 @@ ppModule dflags sDocContext unit_state iface =
 -- | If the export item is an 'ExportDecl', get the attached Hoogle textual
 -- database entries for that export declaration.
 ppExportItem :: ExportItem DocNameI -> [String]
-ppExportItem (ExportDecl RnExportD{rnExpDHoogle = o}) = o
+ppExportItem (ExportDecl RnExportD{rnExpDHoogle = o}) = map T.unpack o
 ppExportItem _ = []
 
 ---------------------------------------------------------------------
@@ -415,8 +416,8 @@ type Tags = [Tag]
 box :: (a -> b) -> a -> [b]
 box f x = [f x]
 
-str :: String -> [Tag]
-str a = [Str a]
+str :: T.Text -> [Tag]
+str a = [Str (T.unpack a)]
 
 -- want things like paragraph, pre etc to be handled by blank lines in the source document
 -- and things like \n and \t converted away
@@ -432,8 +433,8 @@ markupTag sDocContext =
     , markupEmpty = str ""
     , markupString = str
     , markupAppend = (++)
-    , markupIdentifier = box (TagInline "a") . str . out sDocContext
-    , markupIdentifierUnchecked = box (TagInline "a") . str . showWrapped (out sDocContext . snd)
+    , markupIdentifier = box (TagInline "a") . str . T.pack . out sDocContext
+    , markupIdentifierUnchecked = box (TagInline "a") . str . showWrapped (T.pack . out sDocContext . snd)
     , markupModule = \(ModLink m label) -> box (TagInline "a") (fromMaybe (str m) label)
     , markupWarning = box (TagInline "i")
     , markupEmphasis = box (TagInline "i")
@@ -449,7 +450,7 @@ markupTag sDocContext =
     , markupHyperlink = \(Hyperlink url mLabel) -> box (TagInline "a") (fromMaybe (str url) mLabel)
     , markupAName = const $ str ""
     , markupProperty = box TagPre . str
-    , markupExample = box TagPre . str . unlines . map exampleToString
+    , markupExample = box TagPre . str . T.unlines . map exampleToString
     , markupHeader = \(Header l h) -> box (TagInline $ "h" ++ show l) h
     , markupTable = \(Table _ _) -> str "TODO: table"
     }

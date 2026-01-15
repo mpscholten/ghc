@@ -41,6 +41,7 @@ import Haddock.Backends.Xhtml.Utils
 import Haddock.GhcUtils
 import Haddock.Types
 import Haddock.Utils
+import qualified Data.Text as T
 import qualified Data.Text.Lazy as LText
 
 -- | Indicator of how to render a 'DocName' into 'Html'
@@ -66,7 +67,7 @@ ppUncheckedLink :: Qualification -> Wrap (ModuleName, OccName) -> Html
 ppUncheckedLink _ x = linkIdOcc' mdl (Just occ) << occHtml
   where
     (mdl, occ) = unwrap x
-    occHtml = toHtml (showWrapped (occNameString . snd) x) -- TODO: apply ppQualifyName
+    occHtml = toHtml (showWrapped (T.pack . occNameString . snd) x) -- TODO: apply ppQualifyName
 
 -- The Bool indicates if it is to be rendered in infix notation
 ppLDocName :: Qualification -> Notation -> GenLocated l DocName -> Html

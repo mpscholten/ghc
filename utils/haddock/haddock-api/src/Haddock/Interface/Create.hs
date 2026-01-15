@@ -42,6 +42,8 @@ import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes, isJust, mapMaybe, maybeToList)
 import Data.Traversable (for)
+import qualified Data.Text as T
+import qualified Data.Text.Encoding as Text.Encoding
 import GHC hiding (lookupName)
 import GHC.Builtin.Names
 import GHC.Builtin.Types.Prim
@@ -126,7 +128,7 @@ createInterface1' flags unit_state dflags hie_file mod_iface ifaces inst_ifaces 
     pkg_name :: Maybe Package
     pkg_name =
       let
-        unpack (PackageName name) = unpackFS name
+        unpack (PackageName name) = T.pack (unpackFS name)
        in
         fmap unpack pkg_name_fs
 
@@ -157,7 +159,7 @@ createInterface1' flags unit_state dflags hie_file mod_iface ifaces inst_ifaces 
   mod_iface_docs <- case mi_docs mod_iface of
     Just docs -> pure docs
     Nothing -> do
-      warn $ showPpr dflags mdl ++ " has no docs in its .hi file"
+      warn $ T.pack (showPpr dflags mdl ++ " has no docs in its .hi file")
       pure emptyDocs
   -- Derive final options to use for haddocking this module
   doc_opts <- mkDocOpts (docs_haddock_opts mod_iface_docs) flags mdl
@@ -362,8 +364,11 @@ parseWarning parserOpts sDocContext w = case w of
     fsToDoc :: FastString -> HsDocString
     fsToDoc fs = GeneratedDocString $ HsDocStringChunk (bytesFS fs)
 
+    fastStringToText :: FastString -> T.Text
+    fastStringToText = Text.Encoding.decodeUtf8 . bytesFS
+
     format x bs =
-      DocWarning . DocParagraph . DocAppend (DocString x)
+      DocWarning . DocParagraph . DocAppend (DocString (fastStringToText x))
         <$> foldrM (\doc rest -> docAppend <$> processDocString parserOpts sDocContext doc <*> pure rest) DocEmpty bs
 
 -------------------------------------------------------------------------------
@@ -398,7 +403,7 @@ parseOption "not-home" = return (Just OptNotHome)
 parseOption "show-extensions" = return (Just OptShowExtensions)
 parseOption "print-explicit-runtime-reps" = return (Just OptPrintRuntimeRep)
 parseOption "redact-type-synonyms" = return (Just OptRedactTypeSyns)
-parseOption other = warn ("Unrecognised option: " ++ other) >> return Nothing
+parseOption other = warn (T.pack ("Unrecognised option: " ++ other)) >> return Nothing
 
 --------------------------------------------------------------------------------
 -- Declarations
@@ -467,7 +472,7 @@ mkExportItems
         DsiNamedChunkRef ref -> do
           case Map.lookup ref namedChunks of
             Nothing -> do
-              warn $ "Cannot find documentation for: $" ++ ref
+              warn $ T.pack ("Cannot find documentation for: $" ++ ref)
               pure []
             Just hsDoc' -> do
               doc <- processDocStringParas parserOpts sDocContext pkgName hsDoc'
@@ -527,7 +532,7 @@ unrestrictedModExports sDocContext thisMod ifaceMap instIfaceMap avails mod_name
         case Map.lookup mod_name instIfaceMap' of
           Just iface -> pure $ Just (instMod iface, mkNameSet (instExports iface))
           Nothing -> do
-            warn $
+            warn $ T.pack $
               "Warning: "
                 ++ pretty sDocContext thisMod
                 ++ ": Could not find "
@@ -612,7 +617,7 @@ availExportItem
                     -- with signature inheritance
                     case Map.lookup (nameModule t) instIfaceMap of
                       Nothing -> do
-                        warn $
+                        warn $ T.pack $
                           "Warning: "
                             ++ pretty sDocContext thisMod
                             ++ ": Couldn't find .haddock for export "
