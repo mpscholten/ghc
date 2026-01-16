@@ -17,6 +17,34 @@
 # they are somewhat unreliable, and it is harder to re-run these numbers to
 # detect outliers, as described in Note [Measuring residency]. See #9556.
 
+import re
+
+def mark_perf_test(name, opts):
+    opts.is_stats_test = True
+
+def read_stats_ms(name, metric):
+    def read(way):
+        stats_path = in_testdir(statsFile(False, name))
+        try:
+            stats_file_contents = stats_path.read_text()
+        except IOError as e:
+            raise StatsException(str(e))
+
+        match = re.search(r'\("' + re.escape(metric) + r'", "([0-9.]+)"\)', stats_file_contents)
+        if match is None:
+            raise StatsException("No such metric")
+        return int(round(float(match.group(1)) * 1000))
+    return read
+
+async def haddock_parallel(name, way):
+    cmd = (
+        "python3 gen_haddock_parallel.py haddock-par-src 300 && "
+        "{haddock} --html --quickjump --hyperlinked-source "
+        "-t \"Haddock Concurrency Test\" -o haddock-out "
+        "haddock-par-src/Mod*.hs -j2 +RTS -N2 -RTS"
+    )
+    return await simple_run(name, way, cmd, getTestOpts().extra_run_opts)
+
 test('haddock.base',
      [unless(in_tree_compiler(), skip), req_haddock
      ,collect_stats('bytes allocated',5, static_stats_file='base.t')
@@ -36,4 +64,17 @@ test('haddock.compiler',
      ,collect_stats('bytes allocated',10, static_stats_file='ghc.t')
       ],
      static_stats,
+     [])
+
+test('haddock.parallel',
+     [unless(in_tree_compiler(), skip), req_haddock
+     # Generate a 300-module dependency chain and measure haddock wall time:
+     # https://gitlab.haskell.org/ghc/ghc/-/merge_requests/15173
+     ,mark_perf_test
+     ,only_ways(['normal'])
+     ,ignore_stdout, ignore_stderr
+     ,extra_files(['gen_haddock_parallel.py'])
+     ,collect_generic_stat('total_wall_ms', 20, read_stats_ms('haddock.parallel', 'total_wall_seconds'))
+      ],
+     haddock_parallel,
      [])
