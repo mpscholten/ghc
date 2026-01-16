@@ -2,7 +2,7 @@ TOP=../../..
 include $(TOP)/mk/boilerplate.mk
 include $(TOP)/mk/test.mk
 
-.PHONY: T4007 T16473
+.PHONY: T4007 T16473 pretty-lib
 T4007:
 	$(RM) -f T4007.hi T4007.o
 	'$(TEST_HC)' $(TEST_HC_OPTS) -c -O -ddump-rule-firings T4007.hs
@@ -12,6 +12,14 @@ T11068:
 	'$(TEST_HC)' $(TEST_HC_OPTS) -c -O T11068a.hs
 	'$(TEST_HC)' $(TEST_HC_OPTS) -c -O T11068b.hs
 	-'$(TEST_HC)' $(TEST_HC_OPTS) -c -O T11068.hs -ddump-simpl | grep 'Generic'
+
+pretty-lib:
+	$(RM) -rf pretty-dist
+	mkdir -p pretty-dist
+	'$(TEST_HC)' $(TEST_HC_OPTS) -v0 -O -fforce-recomp -cpp -w -Wno-safe \
+		-odir pretty-dist -hidir pretty-dist \
+		-isrc --make src/Text/PrettyPrint.hs \
+		+RTS -V0 -tpretty-lib.comp.stats --machine-readable -RTS
 
 MultiModulesRecomp:
 	./genMultiLayerModules
@@ -49,4 +57,3 @@ InstanceMatching:
 T22744:
 	./genT22744
 	'$(TEST_HC)' $(TEST_HC_OPTS) T22744.hs
-

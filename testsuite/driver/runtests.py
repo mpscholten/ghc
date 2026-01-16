@@ -401,6 +401,10 @@ def tabulate_metrics(metrics: List[PerfMetric]) -> None:
             return "NaN%"
         else:
             return "{:+2.1f}%".format(100 * (val1 - val0) / val0)
+    def format_metric_value(metric: str, value: float) -> str:
+        if metric.endswith('cpu_seconds') or metric.endswith('elapsed_seconds'):
+            return "{:13.3f}".format(value)
+        return "{:13,d}".format(int(value))
     dataRows = [row((
         "{}({})".format(x.stat.test, x.stat.way),
         shorten_metric_name(x.stat.metric),
@@ -409,9 +413,9 @@ def tabulate_metrics(metrics: List[PerfMetric]) -> None:
           if x.baseline is not None else "",
         "{}".format(x.baseline.perfStat.test_env)
           if x.baseline is not None else "",
-        "{:13,d}".format(int(x.baseline.perfStat.value))
+        format_metric_value(x.stat.metric, x.baseline.perfStat.value)
           if x.baseline is not None else "",
-        "{:13,d}".format(int(x.stat.value)),
+        format_metric_value(x.stat.metric, x.stat.value),
         strDiff(x),
         "{}".format(x.change.hint())
     )) for x in sorted(metrics, key =

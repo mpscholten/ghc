@@ -901,14 +901,16 @@ def _collect_stats(name: TestName, opts, metrics, deviation: Optional[int],
             stats_file_contents = stats_file.read_text()
         except IOError as e:
             raise StatsException(str(e))
-        field_match = re.search('\\("' + metric_name + '", "([0-9]+)"\\)', stats_file_contents)
+        field_match = re.search('\\("' + re.escape(metric_name) + '", "([^"]+)"\\)', stats_file_contents)
         if field_match is None:
             print('Failed to find metric: ', metric_name)
             raise StatsException("No such metric")
         else:
-            val = field_match.group(1)
-            assert val is not None
-            return int(val)
+            val_str = field_match.group(1)
+            assert val_str is not None
+            if re.search(r'[.eE]', val_str):
+                return float(val_str)
+            return int(val_str)
 
     # How to read the result of the performance test
     def read_perf_stats_file(way, metric_name):

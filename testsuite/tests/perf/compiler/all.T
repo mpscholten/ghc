@@ -248,6 +248,16 @@ test('T10370',
 
 test('T11068', normal, makefile_test, ['T11068'])
 
+test('pretty-lib',
+     [ only_ways(['normal']),
+       collect_compiler_stats('bytes allocated', 2),
+       collect_compiler_stats('total_cpu_seconds', 20),
+       extra_files(['../../../../libraries/pretty/src']),
+       ignore_stderr,
+     ],
+     makefile_test,
+     ['pretty-lib'])
+
 test('T10547',
      [ collect_compiler_runtime(4),
      ],
