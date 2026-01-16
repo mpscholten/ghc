@@ -22,6 +22,10 @@ Quick start:  the following gives you a default build:
     $ ./configure
     $ ./hadrian/build
 
+  If configure cannot find `gmp.h`, it will enable the in-tree GMP by default.
+  To require a system GMP, use `--with-intree-gmp=no` and, if needed, provide
+  `--with-gmp-includes` and `--with-gmp-libraries`.
+
   On Windows, you need an extra repository containing some build tools.
   These can be downloaded for you by configure. This only needs to be done once by running:
 

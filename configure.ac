@@ -421,6 +421,28 @@ MAYBE_OVERRIDE_STAGE0([ar],[AR_STAGE0])
 dnl make extensions visible to allow feature-tests to detect them lateron
 AC_USE_SYSTEM_EXTENSIONS
 
+dnl If not forcing in-tree GMP, ensure gmp.h is available or fall back.
+if test "$GMP_FORCE_INTREE" = "NO"
+then
+  gmp_cppflags_save="$CPPFLAGS"
+  if test -n "$GMP_INCLUDE_DIRS"; then
+    CPPFLAGS="$CPPFLAGS -I$GMP_INCLUDE_DIRS"
+  fi
+  AC_CHECK_HEADER([gmp.h], [gmp_header_found=yes], [gmp_header_found=no])
+  CPPFLAGS="$gmp_cppflags_save"
+
+  if test "$gmp_header_found" = "no"; then
+    if test "$GMP_INTREE_REQUESTED" = "EXPLICIT"; then
+      AC_MSG_ERROR([Cannot find gmp.h and --with-intree-gmp=no was given. Install GMP headers or drop --with-intree-gmp=no (or use --with-intree-gmp).])
+    elif test -n "$GMP_INCLUDE_DIRS" -o -n "$GMP_LIB_DIRS"; then
+      AC_MSG_ERROR([Cannot find gmp.h with the supplied GMP paths. Install GMP headers or use --with-intree-gmp.])
+    else
+      AC_MSG_WARN([Cannot find gmp.h; enabling in-tree GMP. Rerun configure with --with-intree-gmp=no to require system GMP.])
+      GMP_FORCE_INTREE="YES"
+    fi
+  fi
+fi
+
 # --with-hs-cpp/--with-hs-cpp-flags
 FP_HSCPP_CMD_WITH_ARGS(HaskellCPPCmd, HaskellCPPArgs)
 AC_SUBST([HaskellCPPCmd])

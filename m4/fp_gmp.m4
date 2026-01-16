@@ -19,8 +19,10 @@ AC_DEFUN([FP_GMP],
   AC_ARG_WITH([intree-gmp],
     [AS_HELP_STRING([--with-intree-gmp],
       [force using the in-tree GMP])],
-      [FP_CAPITALIZE_YES_NO(["$withval"], [GMP_FORCE_INTREE])],
-      [GMP_FORCE_INTREE=NO])
+      [FP_CAPITALIZE_YES_NO(["$withval"], [GMP_FORCE_INTREE])
+       GMP_INTREE_REQUESTED=EXPLICIT],
+      [GMP_FORCE_INTREE=NO
+       GMP_INTREE_REQUESTED=DEFAULT])
 
   AC_ARG_WITH([gmp-framework-preferred],
     [AS_HELP_STRING([--with-gmp-framework-preferred],
@@ -31,5 +33,6 @@ AC_DEFUN([FP_GMP],
   AC_SUBST(GMP_INCLUDE_DIRS)
   AC_SUBST(GMP_LIB_DIRS)
   AC_SUBST(GMP_FORCE_INTREE)
+  AC_SUBST(GMP_INTREE_REQUESTED)
   AC_SUBST(GMP_PREFER_FRAMEWORK)
 ])# FP_GMP
