@@ -83,8 +83,8 @@ parHtmlMarkup qual insertAnchors ppId =
           then namedAnchor (LText.pack (T.unpack aname)) << ("" :: LText.Text)
           else noHtml
     , markupPic = \(Picture uri t) -> image ! ([src (LText.pack (T.unpack uri))] ++ fromMaybe [] (return . title <$> (LText.pack . T.unpack <$> t)))
-    , markupMathInline = \mathjax -> thespan ! [theclass "mathjax"] << toHtml (T.unpack ("\\(" <> mathjax <> "\\)"))
-    , markupMathDisplay = \mathjax -> thespan ! [theclass "mathjax"] << toHtml (T.unpack ("\\[" <> mathjax <> "\\]"))
+    , markupMathInline = \mathjax -> thespan ! [theclass "mathjax"] << toHtml ("\\(" <> mathjax <> "\\)")
+    , markupMathDisplay = \mathjax -> thespan ! [theclass "mathjax"] << toHtml ("\\[" <> mathjax <> "\\]")
     , markupProperty = pre . toHtml
     , markupExample = examplesToHtml
     , markupHeader = \(Header l t) -> makeHeader l t
@@ -122,9 +122,9 @@ parHtmlMarkup qual insertAnchors ppId =
 
     exampleToHtml (Example expression result) = htmlExample
       where
-        htmlExample = htmlPrompt +++ htmlExpression +++ toHtml (T.unpack $ T.unlines result)
+        htmlExample = htmlPrompt +++ htmlExpression +++ toHtml (T.unlines result)
         htmlPrompt = (thecode . toHtml $ (">>> " :: LText.Text)) ! [theclass "prompt"]
-        htmlExpression = (strong . thecode . toHtml $ T.unpack $ expression <> "\n") ! [theclass "userinput"]
+        htmlExpression = (strong . thecode . toHtml $ expression <> "\n") ! [theclass "userinput"]
 
     makeOrdList :: HTML a => [(Int, a)] -> Html
     makeOrdList items = olist << map (\(index, a) -> li ! [intAttr "value" index] << a) items
