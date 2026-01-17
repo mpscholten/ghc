@@ -55,7 +55,7 @@ data Notation
   deriving (Eq, Show)
 
 ppOccName :: OccName -> Html
-ppOccName = toHtml . occNameString
+ppOccName = toHtml . occNameFS
 
 ppRdrName :: RdrName -> Html
 ppRdrName = ppOccName . rdrNameOcc
@@ -125,10 +125,10 @@ ppFullQualName notation mdl name = wrapInfix notation (getOccName name) qname
 ppName :: Notation -> Name -> Html
 ppName notation name =
   case m_pun of
-    Just str -> toHtml (unpackFS str) -- use the punned form
+    Just str -> toHtml str -- use the punned form
     Nothing ->
       wrapInfix notation (getOccName name) $
-        toHtml (getOccString name) -- use the original identifier
+        toHtml (getOccFS name) -- use the original identifier
   where
     m_pun = case notation of
       Raw -> namePun_maybe name
