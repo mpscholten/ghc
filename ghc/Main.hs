@@ -195,6 +195,7 @@ main' postLoadMode units dflags0 args flagWarnings = do
       -- feel like the right place to handle this, but we don't have
       -- a great story for the moment.
       dflags2  | DoInteractive <- postLoadMode = def_ghci_flags
+                                                   `gopt_set` Opt_InsertBreakpoints
                | DoEval _      <- postLoadMode = def_ghci_flags
                | DoRun         <- postLoadMode = def_ghci_flags
                | otherwise                     = dflags1
@@ -206,8 +207,8 @@ main' postLoadMode units dflags0 args flagWarnings = do
                                        -- object code but has little other effect unless you are also using
                                        -- fat interface files.
                                        `gopt_set` Opt_UseBytecodeRatherThanObjects
-                                       -- By default enable the debugger by inserting breakpoints
-                                       `gopt_set` Opt_InsertBreakpoints
+                                       -- Opt_InsertBreakpoints is only enabled for DoInteractive,
+                                       -- not for -e or runghc, as breakpoints are not useful there
 
   logger1 <- getLogger
   let logger2 = setLogFlags logger1 (initLogFlags dflags2)
