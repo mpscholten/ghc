@@ -84,7 +84,7 @@ import Haddock.Version
 import Haddock.InterfaceFile
 import Haddock.Options
 import Haddock.Utils
-import Haddock.GhcUtils (modifySessionDynFlags, setOutputDir)
+import Haddock.GhcUtils (fastStringToText, modifySessionDynFlags, setOutputDir)
 import Haddock.Compat (getProcessID)
 
 --------------------------------------------------------------------------------
@@ -407,9 +407,9 @@ render dflags parserOpts logger unit_state flags sinceQual qual ifaces packages 
     pkgKey           = fmap moduleUnit pkgMod
     pkgStr           = fmap unitString pkgKey
     pkgNameVer       = modulePackageInfo unit_state flags pkgMod
-    pkgName          = fmap (unpackFS . (\(PackageName n) -> n)) (fst pkgNameVer)
+    pkgName          = fmap (fastStringToText . (\(PackageName n) -> n)) (fst pkgNameVer)
     sincePkg         = case sinceQual of
-                         External -> fmap T.pack pkgName
+                         External -> pkgName
                          Always -> Nothing
 
     (srcBase, srcModule, srcEntity, srcLEntity) = sourceUrls flags

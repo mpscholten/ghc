@@ -32,7 +32,6 @@ module Haddock.Backends.Xhtml.Names
 
 import Data.List (stripPrefix)
 import GHC hiding (LexicalFixity (..))
-import GHC.Data.FastString (unpackFS)
 import GHC.Types.Name
 import GHC.Types.Name.Reader
 import Text.XHtml hiding (name, p, quote)
@@ -61,7 +60,7 @@ ppRdrName :: RdrName -> Html
 ppRdrName = ppOccName . rdrNameOcc
 
 ppIPName :: HsIPName -> Html
-ppIPName = toHtml . ('?' :) . unpackFS . hsIPNameFS
+ppIPName = toHtml . ("?" <>) . fastStringToText . hsIPNameFS
 
 ppUncheckedLink :: Qualification -> Wrap (ModuleName, OccName) -> Html
 ppUncheckedLink _ x = linkIdOcc' mdl (Just occ) << occHtml

@@ -43,12 +43,11 @@ import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes, isJust, mapMaybe, maybeToList)
 import Data.Traversable (for)
 import qualified Data.Text as T
-import qualified Data.Text.Encoding as Text.Encoding
 import GHC hiding (lookupName)
 import GHC.Builtin.Names
 import GHC.Builtin.Types.Prim
 import GHC.Core.ConLike (ConLike (..))
-import GHC.Data.FastString (FastString, bytesFS, unpackFS)
+import GHC.Data.FastString (FastString, bytesFS)
 import qualified GHC.Driver.Config.Parser as Parser
 import qualified GHC.Driver.DynFlags as DynFlags
 import GHC.Driver.Ppr
@@ -128,7 +127,7 @@ createInterface1' flags unit_state dflags hie_file mod_iface ifaces inst_ifaces 
     pkg_name :: Maybe Package
     pkg_name =
       let
-        unpack (PackageName name) = T.pack (unpackFS name)
+        unpack (PackageName name) = fastStringToText name
        in
         fmap unpack pkg_name_fs
 
@@ -363,9 +362,6 @@ parseWarning parserOpts sDocContext w = case w of
 
     fsToDoc :: FastString -> HsDocString
     fsToDoc fs = GeneratedDocString $ HsDocStringChunk (bytesFS fs)
-
-    fastStringToText :: FastString -> T.Text
-    fastStringToText = Text.Encoding.decodeUtf8 . bytesFS
 
     format x bs =
       DocWarning . DocParagraph . DocAppend (DocString (fastStringToText x))

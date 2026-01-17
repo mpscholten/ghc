@@ -34,7 +34,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import GHC
 import GHC.Data.EnumSet as EnumSet
-import GHC.Data.FastString (unpackFS)
+import Haddock.GhcUtils (fastStringToText)
 import GHC.Driver.Session
 import qualified GHC.LanguageExtensions as LangExt
 import GHC.Parser.Lexer (ParserOpts)
@@ -293,4 +293,4 @@ hsDocRenamer hsDoc = \s cands -> nameSetElemsStable $ filterNameSet (nameMatches
     !env = hsDocIds hsDoc
     nameMatches s ok_ns n =
       let occ = occName n
-       in ok_ns (occNameSpace occ) && T.unpack s == unpackFS (occNameFS occ)
+       in ok_ns (occNameSpace occ) && s == fastStringToText (occNameFS occ)

@@ -43,7 +43,7 @@ import GHC.Core.InstEnv
 import GHC.Core.TyCo.Compare (eqType)
 import GHC.Core.TyCo.Rep
 import GHC.Core.TyCon
-import GHC.Data.FastString (unpackFS)
+import Haddock.GhcUtils (fastStringToText)
 import GHC.Driver.Env.Types
 import GHC.HsToCore.Docs
 import GHC.Iface.Load
@@ -370,7 +370,7 @@ simplify (TyConApp tc ts) =
     (SName (tyConName tc))
     (mapMaybe simplify_maybe ts)
 simplify (LitTy (NumTyLit n)) = SimpleIntTyLit n
-simplify (LitTy (StrTyLit s)) = SimpleStringTyLit (T.pack (unpackFS s))
+simplify (LitTy (StrTyLit s)) = SimpleStringTyLit (fastStringToText s)
 simplify (LitTy (CharTyLit c)) = SimpleCharTyLit c
 simplify (CastTy ty _) = simplify ty
 simplify (CoercionTy _) = error "simplify:Coercion"
