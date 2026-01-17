@@ -59,10 +59,10 @@ parHtmlMarkup qual insertAnchors ppId =
         let (mdl, ref) = T.break (== '#') m
             -- Accommodate for old style
             -- foo\#bar anchors
-            mdl' = case T.unpack (T.reverse mdl) of
-              '\\' : _ -> T.init mdl
+            mdl' = case T.unsnoc mdl of
+              Just (rest, '\\') -> rest
               _ -> mdl
-         in ppModuleRef lbl (mkModuleName (T.unpack mdl')) (LText.pack (T.unpack ref))
+         in ppModuleRef lbl (mkModuleName (T.unpack mdl')) (LText.fromStrict ref)
     , markupWarning = thediv ! [theclass "warning"]
     , markupEmphasis = emphasize
     , markupBold = strong
@@ -75,14 +75,14 @@ parHtmlMarkup qual insertAnchors ppId =
         if insertAnchors
           then
             anchor
-              ! [href (LText.pack (T.unpack url))]
+              ! [href (LText.fromStrict url)]
               << fromMaybe (toHtml url) mLabel
           else fromMaybe (toHtml url) mLabel
     , markupAName = \aname ->
         if insertAnchors
-          then namedAnchor (LText.pack (T.unpack aname)) << ("" :: LText.Text)
+          then namedAnchor (LText.fromStrict aname) << ("" :: LText.Text)
           else noHtml
-    , markupPic = \(Picture uri t) -> image ! ([src (LText.pack (T.unpack uri))] ++ fromMaybe [] (return . title <$> (LText.pack . T.unpack <$> t)))
+    , markupPic = \(Picture uri t) -> image ! ([src (LText.fromStrict uri)] ++ fromMaybe [] (return . title <$> (LText.fromStrict <$> t)))
     , markupMathInline = \mathjax -> thespan ! [theclass "mathjax"] << toHtml ("\\(" <> mathjax <> "\\)")
     , markupMathDisplay = \mathjax -> thespan ! [theclass "mathjax"] << toHtml ("\\[" <> mathjax <> "\\]")
     , markupProperty = pre . toHtml

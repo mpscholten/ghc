@@ -41,7 +41,7 @@ parseModuleHeader parserOpts pkgName str0 =
 
     -- trim whitespaces
     trim :: Text -> Text
-    trim = T.dropWhile isSpace . T.reverse . T.dropWhile isSpace . T.reverse
+    trim = T.strip
 
     getKey :: Text -> Maybe Text
     getKey key = fmap trim (lookup key kvs)
