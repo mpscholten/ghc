@@ -31,10 +31,11 @@ import GHCi.RemoteTypes
 import GHCi.Message (LoadedDLL)
 import Control.Exception (throwIO, ErrorCall(..))
 import Control.Monad    ( when )
-import Data.Foldable
 import Foreign.C
 import Foreign.Marshal.Alloc ( alloca, free )
-import Foreign          ( nullPtr, peek )
+import Foreign.Marshal.Array ( withArray, peekArray )
+import Foreign.Marshal.Utils ( withMany )
+import Foreign          ( nullPtr, peek, Ptr )
 import GHC.Exts
 import System.Posix.Internals ( CFilePath, withFilePath, peekFilePath )
 import System.FilePath  ( dropExtension, normalise )
@@ -250,21 +251,42 @@ resolveObjs = do
    r <- c_resolveObjs
    return (r /= 0)
 
+-- | Load multiple DLLs using parallel loading when available.
+-- This function uses the RTS's parallel dlopen implementation to load
+-- multiple dynamic libraries concurrently, which can significantly improve
+-- startup time when loading many libraries.
 loadDLLs :: [String] -> IO (Either String [Ptr LoadedDLL])
-loadDLLs = foldrM load_one $ Right []
-  where
-    load_one _ err@(Left _) = pure err
-    load_one p (Right dlls) = do
-      r <- loadDLL p
-      pure $ case r of
-        Left err -> Left err
-        Right dll -> Right $ dll : dlls
+loadDLLs [] = pure (Right [])
+loadDLLs paths = do
+  let
+    -- On Windows, addDLL takes a filename without an extension
+    paths' | isWindowsHost = map dropExtension paths
+           | otherwise     = paths
+  --
+  withMany withFilePath (map normalise paths') $ \c_paths -> do
+    let n_paths = length paths'
+    -- Allocate array of C strings
+    withArray c_paths $ \paths_arr ->
+      alloca $ \errmsg_ptr -> do
+        handles <- c_loadNativeObjBatch paths_arr (fromIntegral n_paths) errmsg_ptr
+        if handles == nullPtr
+          then do
+            errmsg <- peek errmsg_ptr
+            str <- peekCString errmsg
+            free errmsg
+            return (Left str)
+          else do
+            -- Convert the array of handles to a list
+            result <- peekArray n_paths handles
+            free handles
+            return (Right result)
 
 -- ---------------------------------------------------------------------------
 -- Foreign declarations to RTS entry points which does the real work;
 -- ---------------------------------------------------------------------------
 
 foreign import ccall unsafe "loadNativeObj"           c_loadNativeObj           :: CFilePath -> Ptr CString -> IO (Ptr LoadedDLL)
+foreign import ccall unsafe "loadNativeObjBatch"      c_loadNativeObjBatch      :: Ptr CFilePath -> CInt -> Ptr CString -> IO (Ptr (Ptr LoadedDLL))
 foreign import ccall unsafe "lookupSymbolInNativeObj" c_lookupSymbolInNativeObj :: Ptr LoadedDLL -> CString -> IO (Ptr a)
 foreign import ccall unsafe "initLinker_"             c_initLinker_             :: CInt -> IO ()
 foreign import ccall unsafe "lookupSymbol"            c_lookupSymbol            :: CString -> IO (Ptr a)

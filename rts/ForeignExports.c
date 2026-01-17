@@ -11,8 +11,29 @@
 #include "ForeignExports.h"
 
 /* protected by linker_mutex after start-up */
-static struct ForeignExportsList *pending = NULL;
+static struct ForeignExportsList * volatile pending = NULL;
+
+/*
+ * Note [Thread-local loading_obj for concurrent dlopen]
+ * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ * The loading_obj variable tracks which ObjectCode is currently being loaded.
+ * When dlopen() is called, it synchronously invokes the library's constructors,
+ * which call registerForeignExports(). The registerForeignExports function needs
+ * to know which ObjectCode to associate the exports with.
+ *
+ * To enable concurrent dlopen calls (where multiple threads load different
+ * libraries simultaneously), we make loading_obj thread-local. Each thread
+ * loading a library sees its own loading_obj value, avoiding races between
+ * concurrent loaders.
+ *
+ * The ASSERT(loading_obj == NULL) in foreignExportsLoadingObject ensures that
+ * within a single thread, we don't nest library loads (which would be a bug).
+ */
+#if defined(THREADED_RTS)
+static __thread ObjectCode *loading_obj = NULL;
+#else
 static ObjectCode *loading_obj = NULL;
+#endif
 
 /*
  * Note [Tracking foreign exports]
@@ -62,9 +83,15 @@ void registerForeignExports(struct ForeignExportsList *exports)
 {
     ASSERT(exports->next == NULL);
     ASSERT(exports->oc == NULL);
-    exports->next = pending;
     exports->oc = loading_obj;
-    pending = exports;
+
+    // Atomic prepend to pending list to support concurrent dlopen calls.
+    // See Note [Thread-local loading_obj for concurrent dlopen].
+    struct ForeignExportsList *old;
+    do {
+        old = pending;
+        exports->next = old;
+    } while (!__sync_bool_compare_and_swap(&pending, old, exports));
 }
 
 /* -----------------------------------------------------------------------------
@@ -88,6 +115,19 @@ void foreignExportsFinishedLoadingObject(void)
     ASSERT(loading_obj != NULL);
     loading_obj = NULL;
     processForeignExports();
+}
+
+/*
+ * Like foreignExportsFinishedLoadingObject but does NOT call processForeignExports.
+ * Used by concurrent loading where processForeignExports must be deferred until
+ * the linker_mutex is held. See Note [Two-phase loading for concurrent dlopen]
+ * in LoadNativeObjPosix.c.
+ */
+void foreignExportsFinishedLoadingObject_deferred(void)
+{
+    ASSERT(loading_obj != NULL);
+    loading_obj = NULL;
+    // processForeignExports will be called later under linker_mutex
 }
 
 /* Caller must own linker_mutex so that we can safely modify

@@ -84,6 +84,17 @@ HsInt resolveObjs( void );
    is responsible for freeing it. */
 void *loadNativeObj( pathchar *path, char **errmsg );
 
+/* Batch load multiple .so files using the system linker.
+   This function loads multiple dynamic libraries concurrently using parallel
+   dlopen calls. This can significantly improve startup time when loading many
+   libraries (e.g., for a large Haskell application with many dependencies).
+
+   Returns an array of handles on success (caller must free with stgFree()),
+   or NULL on failure (with errmsg set to describe the error).
+
+   See Note [Two-phase loading for concurrent dlopen] in LoadNativeObjPosix.c */
+void **loadNativeObjBatch( pathchar **paths, int n_paths, char **errmsg );
+
 /* Mark the .so loaded with the system linker for unloading.
    The RTS will unload it when all the references to the .so disappear from
    the heap.

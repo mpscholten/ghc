@@ -1890,6 +1890,46 @@ void * loadNativeObj (pathchar *path, char **errmsg)
    return r;
 }
 
+/*
+ * Batch load multiple native objects in parallel.
+ * See Note [Two-phase loading for concurrent dlopen] in LoadNativeObjPosix.c
+ *
+ * This function loads multiple dynamic libraries concurrently using parallel
+ * dlopen calls. This can significantly improve startup time when loading many
+ * libraries (e.g., for a large Haskell application with many dependencies).
+ *
+ * Returns: Array of handles on success (caller must free with stgFree),
+ *          NULL on failure (with errmsg set to describe the error)
+ */
+void ** loadNativeObjBatch (pathchar **paths, int n_paths, char **errmsg)
+{
+   IF_DEBUG(linker, debugBelch("loadNativeObjBatch: n_paths = %d\n", n_paths));
+
+   if (n_paths == 0) {
+       return stgMallocBytes(0, "loadNativeObjBatch");
+   }
+
+#if defined(OBJFORMAT_ELF) || defined(OBJFORMAT_MACHO)
+   // Use the parallel loading implementation
+   return loadNativeObjBatch_POSIX(paths, n_paths, errmsg);
+#elif defined(OBJFORMAT_PEi386)
+   // Fall back to sequential loading on Windows
+   void **handles = stgMallocBytes(n_paths * sizeof(void *), "loadNativeObjBatch");
+   for (int i = 0; i < n_paths; i++) {
+       handles[i] = loadNativeObj(paths[i], errmsg);
+       if (handles[i] == NULL) {
+           stgFree(handles);
+           return NULL;
+       }
+   }
+   return handles;
+#else
+   UNUSED(paths);
+   UNUSED(errmsg);
+   barf("loadNativeObjBatch: not implemented on this platform");
+#endif
+}
+
 static HsInt unloadNativeObj_(void *handle)
 {
     bool unloadedAnyObj = false;

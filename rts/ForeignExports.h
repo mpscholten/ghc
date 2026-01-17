@@ -15,6 +15,7 @@
 
 void foreignExportsLoadingObject(ObjectCode *oc);
 void foreignExportsFinishedLoadingObject(void);
+void foreignExportsFinishedLoadingObject_deferred(void);
 void processForeignExports(void);
 
 #include "EndPrivate.h"
