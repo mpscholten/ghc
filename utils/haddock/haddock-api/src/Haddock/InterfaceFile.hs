@@ -55,7 +55,6 @@ import GHC.Utils.Binary
 import Haddock.Types
 import Text.ParserCombinators.ReadP (readP_to_S)
 import qualified Data.Text as T
-import qualified Data.Text.Encoding as TE
 
 import Haddock.Options (Visibility (..))
 
@@ -316,11 +315,6 @@ data BinDictionary = BinDictionary
 -- * GhcBinary instances
 
 -------------------------------------------------------------------------------
-
--- | Efficient Binary instance for Text that encodes/decodes via UTF-8 ByteString
-instance Binary T.Text where
-  put_ bh t = put_ bh (TE.encodeUtf8 t)
-  get bh = TE.decodeUtf8 <$> get bh
 
 instance Binary PackageInfo where
   put_ bh PackageInfo{piPackageName, piPackageVersion} = do
