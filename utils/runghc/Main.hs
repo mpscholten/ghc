@@ -144,7 +144,8 @@ doIt ghc ghc_args rest = do
                 c2 = ":main " ++ show prog_args
 
             let cmd = ghc
-                args = ["-ignore-dot-ghci"] ++
+                -- Use internal interpreter for faster startup (see #16822)
+                args = ["-ignore-dot-ghci", "-fno-external-interpreter"] ++
                        xflag ++
                        ghc_args ++
                        [ "-e", c1, "-e", c2, filename]
