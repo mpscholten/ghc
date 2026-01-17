@@ -15,12 +15,14 @@ please rather run `cabal build hadrian .`. or `./hadrian/build`
 
 from enum import Enum
 import hashlib
+import http.client
 import json
 from pathlib import Path
 import platform
 import shutil
 import subprocess
 import tempfile
+import time
 import sys
 from textwrap import dedent
 from typing import Optional, Dict, List, Tuple, \
@@ -134,6 +136,29 @@ def verify_sha256(expected_hash: SHA256Hash, f: Path):
     h = hash_file(hashlib.sha256(), f.open('rb'))
     if h != expected_hash:
         raise BadTarball(f, expected_hash, h)
+
+def download_with_retry(url: str, output_path: Path, retries: int = 3, initial_delay: int = 1) -> None:
+    """Download a file with exponential backoff retry policy.
+
+    Retries with delays of 1s, 2s, 4s, etc. (similar to curl --retry).
+    """
+    import urllib.request
+    for attempt in range(retries):
+        try:
+            print(f'Fetching {url}...')
+            with urllib.request.urlopen(url, timeout=10) as resp:
+                with output_path.open('wb') as out_file:
+                    shutil.copyfileobj(resp, out_file)
+            return  # success
+        except http.client.IncompleteRead as e:
+            print(f"IncompleteRead error (attempt {attempt + 1}/{retries}): {e}")
+        except Exception as e:
+            print(f"Download error (attempt {attempt + 1}/{retries}): {e}")
+        if attempt < retries - 1:
+            backoff = initial_delay * (2 ** attempt)  # 1s, 2s, 4s, ...
+            print(f"Retrying in {backoff}s...")
+            time.sleep(backoff)
+    raise Exception(f"Failed to download {url} after {retries} attempts.")
 
 def read_bootstrap_info(path: Path) -> BootstrapInfo:
     obj = json.load(path.open())
@@ -331,8 +356,6 @@ def make_archive(hadrian_path):
     return archivename
 
 def fetch_from_plan(plan : FetchPlan, output_dir : Path):
-  import urllib.request
-
   output_dir.resolve()
   output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -341,9 +364,7 @@ def fetch_from_plan(plan : FetchPlan, output_dir : Path):
     url = plan[path].url
     sha = plan[path].sha256
     if not output_path.exists():
-      print(f'Fetching {url}...')
-      with urllib.request.urlopen(url) as resp:
-        shutil.copyfileobj(resp, output_path.open('wb'))
+      download_with_retry(url, output_path)
     verify_sha256(sha, output_path)
 
 def gen_fetch_plan(info : BootstrapInfo) -> FetchPlan :
