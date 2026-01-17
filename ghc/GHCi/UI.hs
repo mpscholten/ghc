@@ -491,9 +491,13 @@ interactiveUI config srcs maybe_exprs = do
    _ <- liftIO $ newStablePtr stderr
 
     -- Initialise buffering for the *interpreted* I/O system
-   (nobuffering, flush) <- runInternal initInterpBuffering
+    -- For non-interactive mode (-e or runghc), we skip compiling the
+    -- disableBuffering helper since turnOffBuffering_ is only used in interactive mode
+   let isInteractive = isNothing maybe_exprs
 
    installInteractiveHomeUnits
+
+   (nobuffering, flush) <- runInternal (initInterpBuffering isInteractive)
 
    -- Update the LogAction. Ensure we don't override the user's log action lest
    -- we break -ddump-json (#14078)

@@ -482,13 +482,18 @@ revertCAFs = do
 -- to refer to *its* stdout/stderr handles
 
 -- | Compile "hFlush stdout; hFlush stderr" once, so we can use it repeatedly
-initInterpBuffering :: Ghc (ForeignHValue, ForeignHValue)
-initInterpBuffering = do
+-- The Bool parameter indicates whether to also compile the disableBuffering helper,
+-- which is only needed for interactive mode (not for -e or runghc).
+initInterpBuffering :: Bool -> Ghc (ForeignHValue, ForeignHValue)
+initInterpBuffering needsDisableBuffering = do
   let mkHelperExpr :: OccName -> Ghc ForeignHValue
       mkHelperExpr occ =
         GHC.compileParsedExprRemote
         $ GHC.nlHsVar $ RdrName.mkOrig gHC_INTERNAL_GHCI_HELPERS occ
-  nobuf <- mkHelperExpr $ mkVarOccFS (fsLit "disableBuffering")
+  -- Only compile disableBuffering for interactive mode where it's actually used
+  nobuf <- if needsDisableBuffering
+           then mkHelperExpr $ mkVarOccFS (fsLit "disableBuffering")
+           else pure (error "initInterpBuffering: noBuffering not compiled")
   flush <- mkHelperExpr $ mkVarOccFS (fsLit "flushAll")
   return (nobuf, flush)
 
