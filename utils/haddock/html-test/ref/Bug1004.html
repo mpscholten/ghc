@@ -107,10 +107,10 @@
 		>&gt;&gt;&gt; </code
 		><strong class="userinput"
 		><code
-		  >Pair &quot;Hello, &quot; (Left 'x') &lt;&gt; Pair &quot;World&quot; (Right 'y')
+		  >Pair &quot;Hello, &quot; (Left &#39;x&#39;) &lt;&gt; Pair &quot;World&quot; (Right &#39;y&#39;)
 </code
 		  ></strong
-		>Pair &quot;Hello, World&quot; (Right 'y')
+		>Pair &quot;Hello, World&quot; (Right &#39;y&#39;)
 </pre
 	      ></details
 	    ></div
@@ -370,7 +370,7 @@
 			  ></p
 			><p class="src"
 			><a href="#"
-			  >foldMap1'</a
+			  >foldMap1&#39;</a
 			  > :: <a href="#" title="Prelude"
 			  >Semigroup</a
 			  > m =&gt; (a -&gt; m) -&gt; <a href="#" title="Bug1004"
@@ -434,7 +434,7 @@
 			  ></p
 			><p class="src"
 			><a href="#"
-			  >foldlMap1'</a
+			  >foldlMap1&#39;</a
 			  > :: (a -&gt; b) -&gt; (b -&gt; a -&gt; b) -&gt; <a href="#" title="Bug1004"
 			  >Product</a
 			  > f g a -&gt; b <a href="#" class="selflink"
@@ -450,7 +450,7 @@
 			  ></p
 			><p class="src"
 			><a href="#"
-			  >foldrMap1'</a
+			  >foldrMap1&#39;</a
 			  > :: (a -&gt; b) -&gt; (a -&gt; b -&gt; b) -&gt; <a href="#" title="Bug1004"
 			  >Product</a
 			  > f g a -&gt; b <a href="#" class="selflink"
@@ -809,11 +809,11 @@
 			><p class="src"
 			><a href="#"
 			  >contramap</a
-			  > :: (a' -&gt; a) -&gt; <a href="#" title="Bug1004"
+			  > :: (a&#39; -&gt; a) -&gt; <a href="#" title="Bug1004"
 			  >Product</a
 			  > f g a -&gt; <a href="#" title="Bug1004"
 			  >Product</a
-			  > f g a' <a href="#" class="selflink"
+			  > f g a&#39; <a href="#" class="selflink"
 			  >#</a
 			  ></p
 			><p class="src"
@@ -1484,7 +1484,7 @@
 			  ></p
 			><p class="src"
 			><a href="#"
-			  >foldMap'</a
+			  >foldMap&#39;</a
 			  > :: <a href="#" title="Data.Monoid"
 			  >Monoid</a
 			  > m =&gt; (a -&gt; m) -&gt; <a href="#" title="Bug1004"
@@ -1502,7 +1502,7 @@
 			  ></p
 			><p class="src"
 			><a href="#"
-			  >foldr'</a
+			  >foldr&#39;</a
 			  > :: (a -&gt; b -&gt; b) -&gt; b -&gt; <a href="#" title="Bug1004"
 			  >Product</a
 			  > f g a -&gt; b <a href="#" class="selflink"
@@ -1518,7 +1518,7 @@
 			  ></p
 			><p class="src"
 			><a href="#"
-			  >foldl'</a
+			  >foldl&#39;</a
 			  > :: (b -&gt; a -&gt; b) -&gt; b -&gt; <a href="#" title="Bug1004"
 			  >Product</a
 			  > f g a -&gt; b <a href="#" class="selflink"
@@ -1745,7 +1745,7 @@
 		  ><p
 		    >Note: in <code class="inline-code"
 		      >deepseq-1.5.0.0</code
-		      > this instance's superclasses were changed.</p
+		      > this instance&#39;s superclasses were changed.</p
 		    ><p
 		    ><em
 		      >Since: deepseq-1.4.3.0</em
@@ -2301,11 +2301,11 @@
 			><p class="src"
 			><a href="#"
 			  >gmapQl</a
-			  > :: (r -&gt; r' -&gt; r) -&gt; r -&gt; (<span class="keyword"
+			  > :: (r -&gt; r&#39; -&gt; r) -&gt; r -&gt; (<span class="keyword"
 			  >forall</span
 			  > d. <a href="#" title="Data.Data"
 			  >Data</a
-			  > d =&gt; d -&gt; r') -&gt; <a href="#" title="Bug1004"
+			  > d =&gt; d -&gt; r&#39;) -&gt; <a href="#" title="Bug1004"
 			  >Product</a
 			  > f g a -&gt; r <a href="#" class="selflink"
 			  >#</a
@@ -2315,11 +2315,11 @@
 			  >gmapQr</a
 			  > :: <span class="keyword"
 			  >forall</span
-			  > r r'. (r' -&gt; r -&gt; r) -&gt; r -&gt; (<span class="keyword"
+			  > r r&#39;. (r&#39; -&gt; r -&gt; r) -&gt; r -&gt; (<span class="keyword"
 			  >forall</span
 			  > d. <a href="#" title="Data.Data"
 			  >Data</a
-			  > d =&gt; d -&gt; r') -&gt; <a href="#" title="Bug1004"
+			  > d =&gt; d -&gt; r&#39;) -&gt; <a href="#" title="Bug1004"
 			  >Product</a
 			  > f g a -&gt; r <a href="#" class="selflink"
 			  >#</a
