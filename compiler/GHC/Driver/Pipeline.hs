@@ -19,7 +19,7 @@ module GHC.Driver.Pipeline (
 
    -- * Interfaces for the compilation manager (interpreted/batch-mode)
    preprocess,
-   compileOne, compileOne',
+   compileOne, compileOne', compileOneWithEarlySignal,
    compileForeign, compileEmptyStub,
 
    -- * Linking
@@ -35,7 +35,7 @@ module GHC.Driver.Pipeline (
    -- * Constructing Pipelines
    TPipelineClass, MonadUse(..),
 
-   preprocessPipeline, fullPipeline, hscPipeline, hscBackendPipeline, hscPostBackendPipeline,
+   preprocessPipeline, fullPipeline, hscPipeline, hscPipelineWithEarlySignal, hscBackendPipeline, hscPostBackendPipeline,
    hscGenBackendPipeline, asPipeline, viaCPipeline, cmmCppPipeline, cmmPipeline, jsPipeline,
    llvmPipeline, llvmLlcPipeline, llvmManglePipeline, pipelineStart,
 
@@ -296,6 +296,85 @@ compileOne' mHscMessage
        upd_summary = summary { ms_hspp_opts = dflags }
        hsc_env = hscSetFlags dflags hsc_env0
 
+-- | Like 'compileOne'' but with an early interface signal callback.
+-- The callback is invoked after typechecking completes (before codegen),
+-- allowing dependent modules to start typechecking earlier.
+-- See Note [Two-phase interface generation] in GHC.Driver.Make
+compileOneWithEarlySignal
+            :: Maybe Messager
+            -> HscEnv
+            -> ModSummary      -- ^ summary for module being compiled
+            -> Int             -- ^ module N ...
+            -> Int             -- ^ ... of M
+            -> Maybe ModIface  -- ^ old interface, if we have one
+            -> HomeModLinkable
+            -> Maybe (HomeModInfo -> IO ())  -- ^ callback for early interface signal
+            -> IO HomeModInfo   -- ^ the complete HomeModInfo, if successful
+
+compileOneWithEarlySignal mHscMessage
+            hsc_env0 summary mod_index nmods mb_old_iface mb_old_linkable mb_early_signal
+ = do
+
+   debugTraceMsg logger 2 (text "compile: input file" <+> text input_fnpp)
+
+   unless (gopt Opt_KeepHiFiles lcl_dflags) $
+             addFilesToClean tmpfs TFL_CurrentModule $
+                 [ml_hi_file $ ms_location summary]
+   unless (gopt Opt_KeepOFiles lcl_dflags) $
+             addFilesToClean tmpfs TFL_GhcSession $
+                 [ml_obj_file $ ms_location summary]
+
+   -- Initialise plugins here for any plugins enabled locally for a module.
+   plugin_hsc_env <- initializePlugins hsc_env
+   let pipe_env = mkPipeEnv NoStop input_fn Nothing pipelineOutput
+   status <- hscRecompStatus mHscMessage plugin_hsc_env upd_summary
+                mb_old_iface mb_old_linkable (mod_index, nmods)
+   let pipeline = hscPipelineWithEarlySignal pipe_env (setDumpPrefix pipe_env plugin_hsc_env, upd_summary, status) mb_early_signal
+   (iface, linkable) <- runPipeline (hsc_hooks plugin_hsc_env) pipeline
+   -- See Note [ModDetails and --make mode]
+   details <- initModDetails plugin_hsc_env iface
+   linkable' <- initWholeCoreBindings plugin_hsc_env iface details linkable
+   return $! HomeModInfo iface details linkable'
+
+ where lcl_dflags  = ms_hspp_opts summary
+       location    = ms_location summary
+       input_fn    = expectJust (ml_hs_file location)
+       input_fnpp  = ms_hspp_file summary
+
+       pipelineOutput = backendPipelineOutput bcknd
+
+       logger = hsc_logger hsc_env0
+       tmpfs  = hsc_tmpfs hsc_env0
+
+       basename = dropExtension input_fn
+
+       -- We add the directory in which the .hs files resides) to the import
+       -- path.  This is needed when we try to compile the .hc file later, if it
+       -- imports a _stub.h file that we created here.
+       current_dir = takeDirectory basename
+       old_paths   = includePaths lcl_dflags
+       loadAsByteCode
+         | Just Target { targetAllowObjCode = obj } <- findTarget summary (hsc_targets hsc_env0)
+         , not obj
+         = True
+         | otherwise = False
+       -- Figure out which backend we're using
+       (bcknd, dflags3)
+         -- #8042: When module was loaded with `*` prefix in ghci, but DynFlags
+         -- suggest to generate object code (which may happen in case -fobject-code
+         -- was set), force it to generate byte-code. This is NOT transitive and
+         -- only applies to direct targets.
+         | loadAsByteCode
+         = ( bytecodeBackend
+           , gopt_set (lcl_dflags { backend = bytecodeBackend }) Opt_ForceRecomp
+           )
+
+         | otherwise
+         = (backend dflags, lcl_dflags)
+       -- See Note [Filepaths and Multiple Home Units]
+       dflags  = dflags3 { includePaths = offsetIncludePaths dflags3 $ addImplicitQuoteInclude old_paths [current_dir] }
+       upd_summary = summary { ms_hspp_opts = dflags }
+       hsc_env = hscSetFlags dflags hsc_env0
 
 -- ---------------------------------------------------------------------------
 -- Link
@@ -862,12 +941,41 @@ fullPipeline pipe_env hsc_env pp_fn src_flavour = do
 
 -- | Everything after preprocess
 hscPipeline :: P m => PipeEnv -> (HscEnv, ModSummary, HscRecompStatus) -> m (ModIface, RecompLinkables)
-hscPipeline pipe_env (hsc_env_with_plugins, mod_sum, hsc_recomp_status) = do
+hscPipeline pipe_env input = hscPipelineWithEarlySignal pipe_env input Nothing
+
+-- | Like 'hscPipeline' but with an optional callback that's invoked after
+-- typechecking completes (before codegen). This allows signaling that the
+-- partial interface is ready, enabling dependent modules to start earlier.
+-- See Note [Two-phase interface generation] in GHC.Driver.Make
+hscPipelineWithEarlySignal :: P m
+  => PipeEnv
+  -> (HscEnv, ModSummary, HscRecompStatus)
+  -> Maybe (HomeModInfo -> IO ())  -- ^ Optional callback for early interface signaling
+  -> m (ModIface, RecompLinkables)
+hscPipelineWithEarlySignal pipe_env (hsc_env_with_plugins, mod_sum, hsc_recomp_status) mb_early_signal = do
   case hsc_recomp_status of
-    HscUpToDate iface mb_linkable -> return (iface, mb_linkable)
+    HscUpToDate iface mb_linkable -> do
+      -- Module is up to date, signal the existing interface with proper ModDetails
+      liftIO $ forM_ mb_early_signal $ \signal -> do
+        details <- initModDetails hsc_env_with_plugins iface
+        signal (HomeModInfo iface details emptyHomeModInfoLinkable)
+      return (iface, mb_linkable)
     HscRecompNeeded mb_old_hash -> do
       (tc_result, warnings) <- use (T_Hsc hsc_env_with_plugins mod_sum)
-      hscBackendAction <- use (T_HscPostTc hsc_env_with_plugins mod_sum tc_result warnings mb_old_hash )
+      hscBackendAction <- use (T_HscPostTc hsc_env_with_plugins mod_sum tc_result warnings mb_old_hash)
+      -- Signal partial interface is ready (before codegen)
+      -- Create an "early" HomeModInfo with proper ModDetails for dependents to use
+      liftIO $ forM_ mb_early_signal $ \signal -> do
+        case hscBackendAction of
+          HscRecomp { hscs_partial_iface = partial_iface } -> do
+            -- Create early interface without codegen info (no CAF/LF info)
+            early_iface <- mkFullIface hsc_env_with_plugins partial_iface Nothing Nothing NoStubs []
+            -- Compute ModDetails so dependents can look up types
+            early_details <- initModDetails hsc_env_with_plugins early_iface
+            signal (HomeModInfo early_iface early_details emptyHomeModInfoLinkable)
+          HscUpdate iface -> do
+            details <- initModDetails hsc_env_with_plugins iface
+            signal (HomeModInfo iface details emptyHomeModInfoLinkable)
       hscBackendPipeline pipe_env hsc_env_with_plugins mod_sum hscBackendAction
 
 hscBackendPipeline :: P m => PipeEnv -> HscEnv -> ModSummary -> HscBackendAction -> m (ModIface, RecompLinkables)
