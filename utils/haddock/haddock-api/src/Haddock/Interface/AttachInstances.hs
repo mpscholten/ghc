@@ -31,7 +31,6 @@ import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, mapMaybe, maybeToList)
 import Data.Ord (comparing)
 import qualified Data.Sequence as Seq
-import qualified Data.Text as T
 import GHC
 import GHC.Builtin.Types (unrestrictedFunTyConName)
 import GHC.Core (isOrphan)
