@@ -55,7 +55,6 @@ module Haddock.Utils
   , spanWith
 
     -- * Concurrency utilities
-  , mapConcurrently_
   , mapConcurrentlyWith_
   , newBoundedSem
 
@@ -349,20 +348,6 @@ html_xrefs' = unsafePerformIO (readIORef html_xrefs_ref')
 -- * Concurrency utilities
 
 --------------------------------------------------------------------------------
-
--- | Execute an action for each element of a list concurrently, bounded
--- by the supplied maximum number of active threads.
--- If any action throws an exception, all other actions are allowed to complete,
--- then one of the exceptions is re-thrown. The order of exception re-throwing
--- corresponds to the order of elements in the input list, not the chronological
--- order in which exceptions occurred.
-mapConcurrently_ :: Int -> (a -> IO ()) -> [a] -> IO ()
-mapConcurrently_ _ _ [] = return ()
-mapConcurrently_ maxThreads f xs
-  | maxThreads <= 1 = mapM_ f xs
-  | otherwise = do
-      gate <- newBoundedSem maxThreads
-      mapConcurrentlyWith_ gate f xs
 
 mapConcurrentlyWith_ :: AbstractSem -> (a -> IO ()) -> [a] -> IO ()
 mapConcurrentlyWith_ _ _ [] = return ()
