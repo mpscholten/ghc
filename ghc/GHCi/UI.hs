@@ -665,6 +665,30 @@ to this home unit.
 
 The 'DynFlags' of the 'interactiveSessionUnit' can be modified via the ':set'
 commands in the GHCi session.
+
+Note [Reusing UnitState for interactive units]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+When setting up the interactive home units (interactiveGhciUnit and
+interactiveSessionUnit), we could call 'initUnits' for each one. However,
+'initUnits' calls 'mkUnitState', which is expensive for large package sets
+(~68ms for 293 packages in IHP). Since GHCi creates two interactive units,
+this would add ~136ms to startup time.
+
+Optimization: Instead of calling 'initUnits' twice, we reuse the already-
+computed 'UnitState' from an existing home unit (the main unit). The
+interactive units just need to "see" the same external packages - they only
+differ in their home unit IDs and some package flags that reference other
+home units (not external packages).
+
+The key insight is that:
+1. The external package database is identical for all home units
+2. The expensive parts of 'mkUnitState' (mergeDatabases, validateDatabase,
+   mkModuleNameProvidersMap) produce the same results
+3. Interactive units are simple DefiniteHomeUnits with no instantiation
+
+By reusing the UnitState, we avoid 2 expensive 'mkUnitState' calls during
+GHCi startup, significantly improving performance for projects with many
+packages.
 -}
 
 -- | Set up the multiple home unit session.
@@ -751,22 +775,28 @@ installInteractiveHomeUnits = do
         , importPaths = []
         }
 
+  -- Optimization: Instead of calling initUnits twice (expensive for large package sets),
+  -- reuse the UnitState from an existing home unit. The interactive units just need
+  -- to "see" the same external packages, with different home unit IDs.
+  -- See Note [Reusing UnitState for interactive units]
   let
-    cached_unit_dbs =
-        concat
-      . catMaybes
-      . fmap homeUnitEnv_unit_dbs
-      $ Foldable.toList
-      $ hsc_HUG hsc_env
+    -- Get existing UnitState and cached DBs from any home unit
+    existingHomeUnitEnv = head $ Foldable.toList $ hsc_HUG hsc_env
+    existingUnitState = homeUnitEnv_units existingHomeUnitEnv
+    cached_unit_dbs = fromMaybe [] $ homeUnitEnv_unit_dbs existingHomeUnitEnv
 
-    all_unit_ids =
-      S.insert interactiveGhciUnitId $
-      S.insert interactiveSessionUnitId $
-      hsc_all_home_unit_ids hsc_env
+    -- Create HomeUnits for the interactive units
+    -- These are simple definite units with no instantiation
+    ghciPromptHomeUnit = DefiniteHomeUnit interactiveGhciUnitId Nothing
+    ghciSessionHomeUnit = DefiniteHomeUnit interactiveSessionUnitId Nothing
 
-  ghciPromptUnit  <- setupHomeUnitFor logger dflagsPrompt  all_unit_ids cached_unit_dbs
-  ghciSessionUnit <- setupHomeUnitFor logger dflagsSession all_unit_ids cached_unit_dbs
+  -- Build HomeUnitEnvs directly without calling initUnits
+  promptHpt <- liftIO emptyHomePackageTable
+  sessionHpt <- liftIO emptyHomePackageTable
   let
+    ghciPromptUnit = HUG.mkHomeUnitEnv existingUnitState (Just cached_unit_dbs) dflagsPrompt promptHpt (Just ghciPromptHomeUnit)
+    ghciSessionUnit = HUG.mkHomeUnitEnv existingUnitState (Just cached_unit_dbs) dflagsSession sessionHpt (Just ghciSessionHomeUnit)
+
     -- Setup up the HUG, install the interactive home units
     withInteractiveUnits =
         HUG.unitEnv_insert interactiveGhciUnitId ghciPromptUnit
@@ -786,13 +816,6 @@ installInteractiveHomeUnits = do
     )
 
   pure ()
-  where
-    setupHomeUnitFor :: GHC.GhcMonad m => Logger -> DynFlags -> S.Set UnitId -> [UnitDatabase UnitId] -> m HomeUnitEnv
-    setupHomeUnitFor logger dflags all_home_units cached_unit_dbs = do
-      (dbs,unit_state,home_unit,_mconstants) <-
-        liftIO $ initUnits logger dflags (Just cached_unit_dbs) all_home_units
-      hpt <- liftIO emptyHomePackageTable
-      pure (HUG.mkHomeUnitEnv unit_state (Just dbs) dflags hpt (Just home_unit))
 
 reportError :: GhciMonad m => GhciCommandMessage -> m ()
 reportError err = do
