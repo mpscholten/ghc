@@ -1489,7 +1489,13 @@ locateLib interp hsc_env is_hs bc_dirs lib_dirs gcc_dirs lib0
 #endif
     tryImpLib gcc  `orElse`
     findArchive    `orElse`
-    tryGcc         `orElse`
+    -- Note [tryGcc and system libraries]
+    -- On Windows, tryGcc helps find libraries in gcc's search path.
+    -- On Unix-like systems (macOS, Linux), system libraries like iconv
+    -- are found via dlopen, not via gcc --print-file-name. Skipping
+    -- tryGcc avoids expensive compiler invocations that always fail
+    -- for system libraries. See #16822 for performance discussion.
+    (if os == OSMinGW32 then tryGcc else return Nothing) `orElse`
     assumeDll
 
   | loading_dynamic_hs_libs -- search for .so libraries first.
