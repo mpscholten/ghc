@@ -55,7 +55,7 @@ import Paths_haddock_api (getDataDir)
 #endif
 import System.Directory (doesDirectoryExist, getTemporaryDirectory)
 import qualified Data.Text as T
-import qualified Data.Text.IO as T
+import qualified Data.Text.IO.Utf8 as T.Utf8
 import Text.ParserCombinators.ReadP (readP_to_S)
 import GHC hiding (verbosity)
 import GHC.Settings.Config
@@ -834,9 +834,7 @@ getPrologue parserOpts flags =
   case [filename | Flag_Prologue filename <- flags ] of
     [] -> return Nothing
     [filename] -> do
-      h <- openFile filename ReadMode
-      hSetEncoding h utf8
-      str <- T.hGetContents h -- semi-closes the handle
+      str <- T.Utf8.readFile filename
       return . Just $! second (fmap rdrName) $ parseParas parserOpts Nothing str
     _ -> throwE "multiple -p/--prologue options"
 
