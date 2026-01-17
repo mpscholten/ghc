@@ -55,6 +55,7 @@ import GHC.Utils.Binary
 import Haddock.Types
 import Text.ParserCombinators.ReadP (readP_to_S)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 
 import Haddock.Options (Visibility (..))
 
@@ -316,6 +317,11 @@ data BinDictionary = BinDictionary
 
 -------------------------------------------------------------------------------
 
+-- | Efficient Binary instance for Text that encodes/decodes via UTF-8 ByteString
+instance Binary T.Text where
+  put_ bh t = put_ bh (TE.encodeUtf8 t)
+  get bh = TE.decodeUtf8 <$> get bh
+
 instance Binary PackageInfo where
   put_ bh PackageInfo{piPackageName, piPackageVersion} = do
     put_ bh (unPackageName piPackageName)
@@ -439,38 +445,38 @@ instance Binary DocOption where
 
 instance Binary Example where
   put_ bh (Example expression result) = do
-    put_ bh (T.unpack expression)
-    put_ bh (map T.unpack result)
+    put_ bh expression
+    put_ bh result
   get bh = do
-    expression <- T.pack <$> get bh
-    result <- map T.pack <$> get bh
+    expression <- get bh
+    result <- get bh
     return (Example expression result)
 
 instance Binary a => Binary (Hyperlink a) where
   put_ bh (Hyperlink url label) = do
-    put_ bh (T.unpack url)
+    put_ bh url
     put_ bh label
   get bh = do
-    url <- T.pack <$> get bh
+    url <- get bh
     label <- get bh
     return (Hyperlink url label)
 
 instance Binary a => Binary (ModLink a) where
   put_ bh (ModLink m label) = do
-    put_ bh (T.unpack m)
+    put_ bh m
     put_ bh label
   get bh = do
-    m <- T.pack <$> get bh
+    m <- get bh
     label <- get bh
     return (ModLink m label)
 
 instance Binary Picture where
   put_ bh (Picture uri title) = do
-    put_ bh (T.unpack uri)
-    put_ bh (fmap T.unpack title)
+    put_ bh uri
+    put_ bh title
   get bh = do
-    uri <- T.pack <$> get bh
-    title <- fmap T.pack <$> get bh
+    uri <- get bh
+    title <- get bh
     return (Picture uri title)
 
 instance Binary a => Binary (Header a) where
@@ -517,10 +523,10 @@ instance Binary Meta where
 
 instance Binary MetaSince where
   put_ bh (MetaSince v p) = do
-    put_ bh (T.unpack <$> v)
+    put_ bh v
     put_ bh p
   get bh = do
-    v <- fmap T.pack <$> get bh
+    v <- get bh
     p <- get bh
     return (MetaSince v p)
 
@@ -542,7 +548,7 @@ instance (Binary mod, Binary id) => Binary (DocH mod id) where
     put_ bh ab
   put_ bh (DocString ac) = do
     putByte bh 2
-    put_ bh (T.unpack ac)
+    put_ bh ac
   put_ bh (DocParagraph ad) = do
     putByte bh 3
     put_ bh ad
@@ -575,7 +581,7 @@ instance (Binary mod, Binary id) => Binary (DocH mod id) where
     put_ bh x
   put_ bh (DocAName an) = do
     putByte bh 14
-    put_ bh (T.unpack an)
+    put_ bh an
   put_ bh (DocExamples ao) = do
     putByte bh 15
     put_ bh ao
@@ -587,7 +593,7 @@ instance (Binary mod, Binary id) => Binary (DocH mod id) where
     put_ bh ag
   put_ bh (DocProperty x) = do
     putByte bh 18
-    put_ bh (T.unpack x)
+    put_ bh x
   put_ bh (DocBold x) = do
     putByte bh 19
     put_ bh x
@@ -596,10 +602,10 @@ instance (Binary mod, Binary id) => Binary (DocH mod id) where
     put_ bh aa
   put_ bh (DocMathInline x) = do
     putByte bh 21
-    put_ bh (T.unpack x)
+    put_ bh x
   put_ bh (DocMathDisplay x) = do
     putByte bh 22
-    put_ bh (T.unpack x)
+    put_ bh x
   put_ bh (DocTable x) = do
     putByte bh 23
     put_ bh x
@@ -618,7 +624,7 @@ instance (Binary mod, Binary id) => Binary (DocH mod id) where
         ab <- get bh
         return (DocAppend aa ab)
       2 -> do
-        ac <- T.pack <$> get bh
+        ac <- get bh
         return (DocString ac)
       3 -> do
         ad <- get bh
@@ -660,7 +666,7 @@ instance (Binary mod, Binary id) => Binary (DocH mod id) where
         x <- get bh
         return (DocPic x)
       14 -> do
-        an <- T.pack <$> get bh
+        an <- get bh
         return (DocAName an)
       15 -> do
         ao <- get bh
@@ -672,7 +678,7 @@ instance (Binary mod, Binary id) => Binary (DocH mod id) where
         ag <- get bh
         return (DocWarning ag)
       18 -> do
-        x <- T.pack <$> get bh
+        x <- get bh
         return (DocProperty x)
       19 -> do
         x <- get bh
@@ -681,10 +687,10 @@ instance (Binary mod, Binary id) => Binary (DocH mod id) where
         aa <- get bh
         return (DocHeader aa)
       21 -> do
-        x <- T.pack <$> get bh
+        x <- get bh
         return (DocMathInline x)
       22 -> do
-        x <- T.pack <$> get bh
+        x <- get bh
         return (DocMathDisplay x)
       23 -> do
         x <- get bh
@@ -698,23 +704,23 @@ instance (Binary mod, Binary id) => Binary (DocH mod id) where
 instance Binary name => Binary (HaddockModInfo name) where
   put_ bh hmi = do
     put_ bh (hmi_description hmi)
-    put_ bh (fmap T.unpack $ hmi_copyright hmi)
-    put_ bh (fmap T.unpack $ hmi_license hmi)
-    put_ bh (fmap T.unpack $ hmi_maintainer hmi)
-    put_ bh (fmap T.unpack $ hmi_stability hmi)
-    put_ bh (fmap T.unpack $ hmi_portability hmi)
-    put_ bh (fmap T.unpack $ hmi_safety hmi)
+    put_ bh (hmi_copyright hmi)
+    put_ bh (hmi_license hmi)
+    put_ bh (hmi_maintainer hmi)
+    put_ bh (hmi_stability hmi)
+    put_ bh (hmi_portability hmi)
+    put_ bh (hmi_safety hmi)
     put_ bh (fromEnum <$> hmi_language hmi)
     put_ bh (map fromEnum $ hmi_extensions hmi)
 
   get bh = do
     descr <- get bh
-    copyr <- fmap T.pack <$> get bh
-    licen <- fmap T.pack <$> get bh
-    maint <- fmap T.pack <$> get bh
-    stabi <- fmap T.pack <$> get bh
-    porta <- fmap T.pack <$> get bh
-    safet <- fmap T.pack <$> get bh
+    copyr <- get bh
+    licen <- get bh
+    maint <- get bh
+    stabi <- get bh
+    porta <- get bh
+    safet <- get bh
     langu <- fmap toEnum <$> get bh
     exten <- map toEnum <$> get bh
     return (HaddockModInfo descr copyr licen maint stabi porta safet langu exten)
