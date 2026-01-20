@@ -65,7 +65,7 @@ import GHC.Driver.Errors.Types
 import GHC.Driver.Main
 import GHC.Driver.MakeSem
 import GHC.Driver.Downsweep
-import GHC.Driver.MakeAction
+import GHC.Driver.MakeAction hiding (sortByPriority)
 
 import GHC.Iface.Load      ( cannotFindModule, readIface )
 import GHC.IfaceToCore     ( typecheckIface )
@@ -683,6 +683,9 @@ load' mhmi_cache how_much diag_wrapper mHscMessage mod_graph = do
 
         build_plan = createBuildPlan mod_graph maybe_top_mods
 
+        -- Compute fan-out for priority scheduling
+        -- See Note [Scheduler Heuristics with Fan-out] in GHC.Unit.Module.Graph
+        fan_out_map = computeFanOut mod_graph
 
     cache <- liftIO $ maybe (return []) iface_clearCache mhmi_cache
     let
@@ -715,7 +718,7 @@ load' mhmi_cache how_much diag_wrapper mHscMessage mod_graph = do
 
     (upsweep_ok, new_deps) <- withDeferredDiagnostics $ do
       hsc_env <- getSession
-      liftIO $ upsweep worker_limit hsc_env mhmi_cache diag_wrapper mHscMessage (toCache pruned_cache) build_plan
+      liftIO $ upsweep worker_limit hsc_env mhmi_cache diag_wrapper mHscMessage (toCache pruned_cache) build_plan fan_out_map
 
     -- At this point, all the HPT variables will be populated, but we don't want
     -- to leak the contents of a failed session.
@@ -984,6 +987,10 @@ data BuildLoopState = BuildLoopState { buildDep :: M.Map NodeKey BuildResult
                                      , bls_two_phase :: !Bool
                                           -- ^ Use two-phase interface signaling? Only useful for parallel builds.
                                           -- See Note [Two-phase interface generation]
+                                     , bls_fan_out :: !(M.Map NodeKey Int)
+                                          -- ^ Fan-out map: for each node, how many nodes depend on it.
+                                          -- Used for priority scheduling. Higher fan-out = higher priority.
+                                          -- See Note [Scheduler Heuristics with Fan-out] in GHC.Unit.Module.Graph
                                      }
 
 nodeId :: BuildM Int
@@ -1015,16 +1022,21 @@ type BuildM a = StateT BuildLoopState IO a
 -- get its direct dependencies from. This might not be the corresponding build action
 -- if the module participates in a loop. This step also labels each node with a number for the output.
 -- See Note [Upsweep] for a high-level description.
+--
+-- The fan-out map is used for priority scheduling: modules with higher fan-out
+-- (more dependents) get higher priority. See Note [Scheduler Heuristics with Fan-out]
+-- in GHC.Unit.Module.Graph.
 interpretBuildPlan :: HomeUnitGraph
                    -> Maybe ModIfaceCache
                    -> M.Map ModNodeKeyWithUid HomeModInfo
                    -> [BuildPlan]
                    -> Bool  -- ^ Use two-phase interface signaling (only useful for parallel builds)
+                   -> M.Map NodeKey Int  -- ^ Fan-out map for priority scheduling
                    -> IO ( Maybe [ModuleGraphNode] -- Is there an unresolved cycle
-                         , [MakeAction] -- Actions we need to run in order to build everything
+                         , [PrioritizedAction] -- Actions we need to run in order to build everything, with priority info
                          , IO [Maybe (Maybe HomeModInfo)]) -- An action to query to get all the built modules at the end.
-interpretBuildPlan hug mhmi_cache old_hpt plan two_phase = do
-  ((mcycle, plans), build_map) <- runStateT (buildLoop plan) (BuildLoopState M.empty 1 two_phase)
+interpretBuildPlan hug mhmi_cache old_hpt plan two_phase fan_out_map = do
+  ((mcycle, plans), build_map) <- runStateT (buildLoop plan) (BuildLoopState M.empty 1 two_phase fan_out_map)
   let wait = collect_results (buildDep build_map)
   return (mcycle, plans, wait)
 
@@ -1045,8 +1057,24 @@ interpretBuildPlan hug mhmi_cache old_hpt plan two_phase = do
 
     n_mods = sum (map count_mods plan)
 
+    -- | Get the fan-out for a NodeKey (default to 0 if not found)
+    getFanOut :: NodeKey -> BuildM Int
+    getFanOut nk = do
+      fan_out <- gets bls_fan_out
+      return $ M.findWithDefault 0 nk fan_out
+
+    -- | Get a sort key for deterministic ordering (typically module name)
+    getSortKey :: ModuleGraphNode -> String
+    getSortKey node = case nodeKeyModName (mkNodeKey node) of
+      Just mn -> moduleNameString mn
+      Nothing -> case mkNodeKey node of
+        NodeKey_Unit iu     -> "unit:" ++ unitIdString (instUnitInstanceOf iu)
+        NodeKey_Module mk   -> "mod:" ++ moduleNameString (gwib_mod (mnkModuleName mk))
+        NodeKey_Link uid    -> "link:" ++ unitIdString uid
+        NodeKey_ExternalUnit uid -> "ext:" ++ unitIdString uid
+
     buildLoop :: [BuildPlan]
-              -> BuildM (Maybe [ModuleGraphNode], [MakeAction])
+              -> BuildM (Maybe [ModuleGraphNode], [PrioritizedAction])
     -- Build the abstract pipeline which we can execute
     -- Building finished
     buildLoop []           = return (Nothing, [])
@@ -1072,7 +1100,7 @@ interpretBuildPlan hug mhmi_cache old_hpt plan two_phase = do
     buildSingleModule :: Maybe [NodeKey]  -- Modules we need to rehydrate before compiling this module
                       -> ResultOrigin
                       -> ModuleGraphNode          -- The node we are compiling
-                      -> BuildM MakeAction
+                      -> BuildM PrioritizedAction
     buildSingleModule rehydrate_nodes origin mod = do
       !build_map <- getBuildMap
       -- 1. Get the direct dependencies of this module
@@ -1090,6 +1118,20 @@ interpretBuildPlan hug mhmi_cache old_hpt plan two_phase = do
       partial_iface_var <- case mod of
         ModuleNode {} | two_phase -> liftIO $ Just <$> newEmptyMVar
         _ -> return Nothing
+
+      -- Determine the phase for priority scheduling
+      -- ModuleNode = TypecheckPhase (produces interface needed by dependents)
+      -- See Note [Priority-based Scheduling] in GHC.Driver.MakeAction
+      let phase = case mod of
+            ModuleNode {} -> TypecheckPhase  -- Module compilation, priority on typecheck
+            LinkNode {}   -> OtherPhase      -- Linking phase
+            InstantiationNode {} -> OtherPhase  -- Backpack instantiation
+            UnitNode {}   -> OtherPhase      -- Unit dependency node
+
+      -- Get fan-out for priority calculation
+      fan_out <- getFanOut (mkNodeKey mod)
+      let !priority = calculatePriority phase fan_out
+          !sort_key = getSortKey mod
 
       !build_action <-
             case mod of
@@ -1162,11 +1204,20 @@ interpretBuildPlan hug mhmi_cache old_hpt plan two_phase = do
 
 
       let result_var = mkResultVar res_var
-      setModulePipeline (mkNodeKey mod) (mkBuildResult origin result_var partial_iface_var)
-      return $! (MakeAction build_action res_var)
+          make_action = MakeAction build_action res_var
+          !node_key = mkNodeKey mod
+      setModulePipeline node_key (mkBuildResult origin result_var partial_iface_var)
+      return $! PrioritizedAction
+        { pa_priority = priority
+        , pa_phase = phase
+        , pa_sort_key = sort_key
+        , pa_node_key = node_key
+        , pa_deps = direct_deps
+        , pa_action = make_action
+        }
 
 
-    buildOneLoopyModule :: ModuleGraphNodeWithBootFile -> BuildM [MakeAction]
+    buildOneLoopyModule :: ModuleGraphNodeWithBootFile -> BuildM [PrioritizedAction]
     buildOneLoopyModule (ModuleGraphNodeWithBootFile mn deps) = do
       ma <- buildSingleModule (Just deps) (Loop Initialise) mn
       -- Rehydration (1) from Note [Hydrating Modules], "Loops with multiple boot files"
@@ -1174,7 +1225,7 @@ interpretBuildPlan hug mhmi_cache old_hpt plan two_phase = do
       return $ [ma, rehydrate_action]
 
 
-    buildModuleLoop :: [Either ModuleGraphNode ModuleGraphNodeWithBootFile] -> BuildM [MakeAction]
+    buildModuleLoop :: [Either ModuleGraphNode ModuleGraphNodeWithBootFile] -> BuildM [PrioritizedAction]
     buildModuleLoop ms = do
       build_modules <- concatMapM (either (fmap (:[]) <$> buildSingleModule Nothing (Loop Initialise)) buildOneLoopyModule) ms
       let extract (Left mn) = GWIB (mkNodeKey mn) NotBoot
@@ -1187,7 +1238,9 @@ interpretBuildPlan hug mhmi_cache old_hpt plan two_phase = do
       return $ build_modules ++ [rehydrate_action]
 
     -- An action which rehydrates the given keys
-    rehydrateAction :: ResultLoopOrigin -> [GenWithIsBoot NodeKey] -> BuildM MakeAction
+    -- Rehydration actions get OtherPhase priority (medium) since they're
+    -- internal loop maintenance operations.
+    rehydrateAction :: ResultLoopOrigin -> [GenWithIsBoot NodeKey] -> BuildM PrioritizedAction
     rehydrateAction origin deps = do
       !build_map <- getBuildMap
       res_var <- liftIO newEmptyMVar
@@ -1228,7 +1281,28 @@ interpretBuildPlan hug mhmi_cache old_hpt plan two_phase = do
       let deps_i = zip deps [0..]
       mapM update_module_pipeline deps_i
 
-      return $ MakeAction loop_action res_var
+      -- Rehydration gets OtherPhase priority with fan-out 0
+      -- (it's an internal operation, not a module compilation)
+      let !priority = calculatePriority OtherPhase 0
+          -- Sort key based on first module in the loop for determinism
+          sort_key = case nodeKeyModName (gwib_mod (head deps)) of
+            Just mn -> moduleNameString mn ++ "_rehydrate"
+            Nothing -> "rehydrate"
+          make_action = MakeAction loop_action res_var
+          -- For dynamic scheduling, use a link node key with the loop's unit
+          -- This is a synthetic key for the rehydration action
+          !node_key = NodeKey_Link loop_unit
+          -- Deps are the modules being rehydrated
+          !dep_keys = map gwib_mod deps
+
+      return $! PrioritizedAction
+        { pa_priority = priority
+        , pa_phase = OtherPhase
+        , pa_sort_key = sort_key
+        , pa_node_key = node_key
+        , pa_deps = dep_keys
+        , pa_action = make_action
+        }
 
       -- Checks that the interfaces returned from hydration match-up with the names of the
       -- modules which were fed into the function.
@@ -1250,15 +1324,20 @@ upsweep
     -> Maybe Messager
     -> M.Map ModNodeKeyWithUid HomeModInfo
     -> [BuildPlan]
+    -> M.Map NodeKey Int  -- ^ Fan-out map for priority scheduling
     -> IO (SuccessFlag, [HomeModInfo])
-upsweep n_jobs hsc_env hmi_cache diag_wrapper mHscMessage old_hpt build_plan = do
+upsweep n_jobs hsc_env hmi_cache diag_wrapper mHscMessage old_hpt build_plan fan_out_map = do
     -- Enable two-phase signaling only for parallel builds (n_jobs > 1)
     -- See Note [Two-phase interface generation]
     let two_phase = case n_jobs of
           NumProcessorsLimit n -> n > 1
           JSemLimit {} -> True  -- Assume parallel for job server
-    (cycle, pipelines, collect_result) <- interpretBuildPlan (hsc_HUG hsc_env) hmi_cache old_hpt build_plan two_phase
-    runPipelines n_jobs hsc_env diag_wrapper mHscMessage pipelines
+    -- interpretBuildPlan now returns PrioritizedActions with priority info
+    -- See Note [Priority-based Scheduling] in GHC.Driver.MakeAction
+    (cycle, pipelines, collect_result) <- interpretBuildPlan (hsc_HUG hsc_env) hmi_cache old_hpt build_plan two_phase fan_out_map
+    -- Use priority-based scheduling for parallel builds
+    -- This sorts actions by priority (fan-out + phase) before running
+    runPipelinesWithPriority n_jobs hsc_env diag_wrapper mHscMessage pipelines
     res <- collect_result
     let sec = initSourceErrorContext (hsc_dflags hsc_env)
 

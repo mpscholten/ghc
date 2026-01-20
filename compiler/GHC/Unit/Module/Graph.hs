@@ -106,6 +106,9 @@ module GHC.Unit.Module.Graph
    , stageSummaryNodeKey
    , mkStageDeps
 
+    -- * Fan-out computation for scheduler heuristics
+   , computeFanOut
+
     -- * Keys into the 'ModuleGraph'
    , NodeKey(..)
    , mkNodeKey
@@ -1055,4 +1058,59 @@ extendMG ModuleGraph{..} node =
     , mg_zero_graph = mkTransZeroDeps (node : mg_mss)
     , mg_has_holes = mg_has_holes || maybe False isHsigFile (moduleNodeInfoHscSource =<< mgNodeIsModule node)
     }
+
+--------------------------------------------------------------------------------
+-- * Fan-out computation for scheduler heuristics
+-- See Note [Scheduler Heuristics with Fan-out]
+--------------------------------------------------------------------------------
+
+-- Note [Scheduler Heuristics with Fan-out]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- When building modules in parallel with -j, the order in which modules are
+-- compiled affects overall build time. Ideally, we want to:
+--
+-- 1. Prioritize modules that many other modules depend on (high "fan-out"),
+--    because completing them unblocks more work.
+--
+-- 2. Prioritize typechecking over code generation, since dependent modules
+--    only need the interface (from typechecking) to start their own
+--    typechecking. See Note [Two-phase interface generation].
+--
+-- The fan-out of a module is the number of modules that transitively depend
+-- on it. A module with high fan-out should be compiled early.
+--
+-- We compute fan-out by:
+-- 1. Building the dependency graph
+-- 2. For each node, counting how many nodes can reach it (reverse reachability)
+--
+-- This is equivalent to transposing the graph and computing reachability
+-- from each node, but we use the existing reachability infrastructure.
+
+-- | Compute the fan-out for each node in the module graph.
+-- Fan-out is the number of modules that transitively depend on a given module.
+-- Higher fan-out means the module is more critical to complete early.
+--
+-- For example, if module A is imported (directly or transitively) by 10 other
+-- modules, its fan-out is 10. Modules with higher fan-out should be prioritized
+-- in the build scheduler.
+computeFanOut :: ModuleGraph -> Map.Map NodeKey Int
+computeFanOut mg = Map.fromList
+    [ (mkNodeKey node, countDependents (mkNodeKey node))
+    | node <- mg_mss mg
+    ]
+  where
+    -- Count how many nodes depend on this node (reverse reachability)
+    -- This is: how many nodes have `nk` in their transitive dependencies?
+    countDependents :: NodeKey -> Int
+    countDependents nk =
+      length [ ()
+             | other <- mg_mss mg
+             , let otherKey = mkNodeKey other
+             , otherKey /= nk
+             , dependsOn otherKey nk
+             ]
+
+    -- Check if `from` depends on `to` (i.e., `to` is reachable from `from`)
+    dependsOn :: NodeKey -> NodeKey -> Bool
+    dependsOn from to = mgQuery mg from to
 
