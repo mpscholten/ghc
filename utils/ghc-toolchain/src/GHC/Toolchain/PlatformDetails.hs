@@ -126,16 +126,10 @@ checkLeadingUnderscore cc nm = checking ctxt $ withTempDir $ \dir -> do
     ctxt = "whether symbols have leading underscores"
 
 checkSubsectionsViaSymbols :: ArchOS -> Cc -> M Bool
-checkSubsectionsViaSymbols archos cc =
-  case archOS_arch archos of
-    ArchAArch64 ->
-      -- subsections via symbols is busted on arm64
-      -- TODO: ^ is this comment up to date?
-      return False
-    _ ->
-      testCompile
-        "whether .subsections-via-symbols directive is supported"
-        (asmStmt ".subsections_via_symbols") cc
+checkSubsectionsViaSymbols _archos cc =
+    testCompile
+      "whether .subsections-via-symbols directive is supported"
+      (asmStmt ".subsections_via_symbols") cc
 
 checkIdentDirective :: Cc -> M Bool
 checkIdentDirective =
