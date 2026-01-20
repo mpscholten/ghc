@@ -51,24 +51,74 @@ pprNatCmmDecl config proc@(CmmProc top_info lbl _ (ListGraph blocks)) =
 
     Just (CmmStaticsRaw info_lbl _) ->
       pprSectionAlign config (Section Text info_lbl) $$
-      -- pprProcAlignment config $$
-      (if platformHasSubsectionsViaSymbols platform
-          then line (pprAsmLabel platform (mkDeadStripPreventer info_lbl) <> char ':')
-          else empty) $$
+      -- See Note [Dead strip prevention on AArch64/Darwin]
       vcat (map (pprBasicBlock platform with_dwarf top_info) blocks) $$
       -- above: Even the first block gets a label, because with branch-chain
       -- elimination, it might be the target of a goto.
-      (if platformHasSubsectionsViaSymbols platform
-       then -- See Note [Subsections Via Symbols]
-                line
-              $ text "\t.long "
-            <+> pprAsmLabel platform info_lbl
-            <+> char '-'
-            <+> pprAsmLabel platform (mkDeadStripPreventer info_lbl)
-       else empty) $$
       pprSizeDecl platform info_lbl
 {-# SPECIALIZE pprNatCmmDecl :: NCGConfig -> NatCmmDecl RawCmmStatics Instr -> SDoc #-}
 {-# SPECIALIZE pprNatCmmDecl :: NCGConfig -> NatCmmDecl RawCmmStatics Instr -> HDoc #-} -- see Note [SPECIALIZE to HDoc] in GHC.Utils.Outputable
+
+{-
+Note [Dead strip prevention on AArch64/Darwin]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+On Darwin, the linker supports "subsections via symbols" which allows dead code
+stripping at the symbol level. When enabled, each global symbol starts a new
+subsection, and the linker can strip unreferenced subsections.
+
+The problem is that GHC's info tables (which contain metadata like closure types,
+entry points, etc.) are placed immediately before their associated code. The info
+table data comes BEFORE the info label, so with subsections_via_symbols:
+
+    .long   0                 ; info table data (orphaned - no symbol!)
+    .long   ...
+    .globl _MyFunc_info
+    _MyFunc_info:             ; <- global symbol starts new subsection here!
+        code...
+
+If _MyFunc_info starts a new subsection, the info table data before it has no
+symbol to anchor it! Even if both are kept, they could be REORDERED by the
+linker, breaking the tables-next-to-code layout.
+
+On x86/Darwin, this is handled using a local _dsp label and a ".long" back-reference
+that creates a RELOCATION tying the subsections together. However, this doesn't work
+on AArch64/Darwin because LLVM/clang doesn't emit relocations for local symbols
+on AArch64 Mach-O.
+
+Instead, we use a combination of:
+  1. A GLOBAL _dsp label BEFORE the info table data to anchor the subsection
+  2. .no_dead_strip on the dsp label to prevent stripping
+  3. .alt_entry on the info label to mark it as NOT starting a new subsection
+
+The key insight is that .alt_entry tells the linker that a symbol is an "alternate
+entry point" into an existing subsection, NOT a new subsection boundary. This keeps
+the info table data and code in the SAME subsection, so they cannot be reordered.
+
+The generated assembly looks like:
+        .globl _dsp_MyFunc_info_dsp
+    _dsp_MyFunc_info_dsp:         ; <- this global symbol starts the subsection
+        .no_dead_strip _dsp_MyFunc_info_dsp
+        .long   0                 ; info table data (in same subsection)
+        .long   ...
+        .alt_entry _MyFunc_info   ; NOT a new subsection boundary
+        .globl _MyFunc_info
+    _MyFunc_info:                 ; entry point (still in same subsection)
+        code...
+
+This way:
+  - The dsp label starts the subsection and owns all the data
+  - The info_lbl is marked as alt_entry so it stays in the same subsection
+  - The linker cannot reorder them because they're in one subsection
+  - .no_dead_strip prevents the subsection from being stripped independently
+  - When a function is truly unreferenced, the whole subsection is stripped together
+
+Note that this only applies to EXTERNALLY VISIBLE info tables. Internal info tables
+(like case continuations, _Lcf_info etc.) are already embedded within their parent
+function's subsection, so they don't start new subsections and don't need this
+special handling.
+
+See #24962 for the original bug report about dead stripping being broken on AArch64/Darwin.
+-}
 
 pprLabel :: IsDoc doc => Platform -> CLabel -> doc
 pprLabel platform lbl =
@@ -132,9 +182,29 @@ pprBasicBlock platform with_dwarf info_env (BasicBlock blockid instrs)
     maybe_infotable c = case mapLookup blockid info_env of
        Nothing   -> c
        Just (CmmStaticsRaw info_lbl info) ->
-          --  pprAlignForSection platform Text $$
+           -- See Note [Dead strip prevention on AArch64/Darwin]
            infoTableLoc $$
+           -- On Darwin with subsections_via_symbols, externally visible info
+           -- tables need special handling because they start new subsections.
+           -- We emit a global dsp label BEFORE the data to anchor the subsection,
+           -- and use .alt_entry on the info label so it doesn't start another.
+           -- Internal info tables (case continuations etc) are already within
+           -- their parent function's subsection, so they don't need this.
+           (if platformHasSubsectionsViaSymbols platform
+               && externallyVisibleCLabel info_lbl
+               then let dsp_lbl = mkDeadStripPreventer info_lbl
+                    in line (text "\t.globl " <> pprAsmLabel platform dsp_lbl) $$
+                       line (pprAsmLabel platform dsp_lbl <> char ':') $$
+                       line (text "\t.no_dead_strip " <> pprAsmLabel platform dsp_lbl)
+               else empty) $$
            vcat (map (pprData platform) info) $$
+           -- Use .alt_entry to mark externally visible info_lbl as an alternate
+           -- entry point, not a new subsection boundary. This keeps the info
+           -- table data in the same subsection as the code.
+           (if platformHasSubsectionsViaSymbols platform
+               && externallyVisibleCLabel info_lbl
+               then line (text "\t.alt_entry " <> pprAsmLabel platform info_lbl)
+               else empty) $$
            pprLabel platform info_lbl $$
            c $$
            (if with_dwarf
