@@ -232,9 +232,9 @@ compileOne' :: Maybe Messager
             -> IO HomeModInfo   -- ^ the complete HomeModInfo, if successful
 
 compileOne' mHscMessage hsc_env0 summary mod_index nmods mb_old_iface mb_old_linkable =
-  -- Delegate to compileOneWithEarlySignal with no early signal callback
+  -- Delegate to compileOneWithEarlySignal with no callbacks
   compileOneWithEarlySignal mHscMessage hsc_env0 summary mod_index nmods
-                            mb_old_iface mb_old_linkable Nothing
+                            mb_old_iface mb_old_linkable Nothing Nothing
 
 -- | Like 'compileOne'' but with an early interface signal callback.
 -- The callback is invoked after typechecking completes (before codegen),
@@ -249,10 +249,11 @@ compileOneWithEarlySignal
             -> Maybe ModIface  -- ^ old interface, if we have one
             -> HomeModLinkable
             -> Maybe (HomeModInfo -> IO ())  -- ^ callback for early interface signal
+            -> Maybe (IO ())  -- ^ callback to wait for dependencies' full interfaces before codegen
             -> IO HomeModInfo   -- ^ the complete HomeModInfo, if successful
 
 compileOneWithEarlySignal mHscMessage
-            hsc_env0 summary mod_index nmods mb_old_iface mb_old_linkable mb_early_signal
+            hsc_env0 summary mod_index nmods mb_old_iface mb_old_linkable mb_early_signal mb_pre_codegen_wait
  = do
 
    debugTraceMsg logger 2 (text "compile: input file" <+> text input_fnpp)
@@ -269,7 +270,7 @@ compileOneWithEarlySignal mHscMessage
    let pipe_env = mkPipeEnv NoStop input_fn Nothing pipelineOutput
    status <- hscRecompStatus mHscMessage plugin_hsc_env upd_summary
                 mb_old_iface mb_old_linkable (mod_index, nmods)
-   let pipeline = hscPipelineWithEarlySignal pipe_env (setDumpPrefix pipe_env plugin_hsc_env, upd_summary, status) mb_early_signal
+   let pipeline = hscPipelineWithEarlySignal pipe_env (setDumpPrefix pipe_env plugin_hsc_env, upd_summary, status) mb_early_signal mb_pre_codegen_wait
    (iface, linkable) <- runPipeline (hsc_hooks plugin_hsc_env) pipeline
    -- See Note [ModDetails and --make mode]
    details <- initModDetails plugin_hsc_env iface
@@ -881,7 +882,7 @@ fullPipeline pipe_env hsc_env pp_fn src_flavour = do
 
 -- | Everything after preprocess
 hscPipeline :: P m => PipeEnv -> (HscEnv, ModSummary, HscRecompStatus) -> m (ModIface, RecompLinkables)
-hscPipeline pipe_env input = hscPipelineWithEarlySignal pipe_env input Nothing
+hscPipeline pipe_env input = hscPipelineWithEarlySignal pipe_env input Nothing Nothing
 
 -- | Like 'hscPipeline' but with an optional callback that's invoked after
 -- typechecking completes (before codegen). This allows signaling that the
@@ -891,8 +892,9 @@ hscPipelineWithEarlySignal :: P m
   => PipeEnv
   -> (HscEnv, ModSummary, HscRecompStatus)
   -> Maybe (HomeModInfo -> IO ())  -- ^ Optional callback for early interface signaling
+  -> Maybe (IO ())  -- ^ Optional callback to wait for dependencies' full interfaces before codegen
   -> m (ModIface, RecompLinkables)
-hscPipelineWithEarlySignal pipe_env (hsc_env_with_plugins, mod_sum, hsc_recomp_status) mb_early_signal = do
+hscPipelineWithEarlySignal pipe_env (hsc_env_with_plugins, mod_sum, hsc_recomp_status) mb_early_signal mb_pre_codegen_wait = do
   case hsc_recomp_status of
     HscUpToDate iface mb_linkable -> do
       -- Module is up to date, signal the existing interface with proper ModDetails
@@ -916,6 +918,10 @@ hscPipelineWithEarlySignal pipe_env (hsc_env_with_plugins, mod_sum, hsc_recomp_s
           HscUpdate iface -> do
             details <- initModDetails hsc_env_with_plugins iface
             signal (HomeModInfo iface details emptyHomeModInfoLinkable)
+      -- Wait for dependencies' full interfaces before starting codegen
+      -- This ensures we have CAF/LFInfo for optimal code generation
+      -- See Note [Two-phase interface generation] in GHC.Driver.Make
+      liftIO $ forM_ mb_pre_codegen_wait id
       hscBackendPipeline pipe_env hsc_env_with_plugins mod_sum hscBackendAction
 
 hscBackendPipeline :: P m => PipeEnv -> HscEnv -> ModSummary -> HscBackendAction -> m (ModIface, RecompLinkables)
