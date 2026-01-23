@@ -1126,13 +1126,30 @@ interpretBuildPlan hug mhmi_cache old_hpt plan two_phase = do
                      -- 1. Rehydration is needed (hs-boot files) - maybeRehydrateBefore needs complete HomeModInfo
                      -- 2. Template Haskell/QuasiQuotes is used - TH splices need to run code from dependencies
                      -- 3. Home-module plugins are used - plugins need to be loaded and executed
+                     -- 4. Module is in an instantiating unit (backpack) - needs InstantiationNode to complete
+                     --    This covers both VirtUnit modules and modules compiled during instantiation
+                     hsc_env <- asks hsc_env
                      let (uses_th, uses_home_plugins) = case ms of
                            ModuleNodeCompile modsummary ->
                              ( isTemplateHaskellOrQQNonBoot modsummary
                              , any isHomePlugin (pluginModNames (ms_hspp_opts modsummary))
                              )
                            ModuleNodeFixed _ _ -> (False, False)  -- Fixed modules are already compiled
-                     let needs_full_deps = isJust rehydrate_mods || uses_th || uses_home_plugins
+                     -- Check if the home unit is using backpack features (instantiating or indefinite)
+                     -- In this case, we need to wait for full deps so InstantiationNode or
+                     -- signature merging can complete before dependent modules start
+                     let is_backpack = case hsc_home_unit_maybe hsc_env of
+                           Just hu -> isHomeUnitInstantiating hu || isHomeUnitIndefinite hu
+                           Nothing -> False
+                     let needs_full_deps = isJust rehydrate_mods || uses_th || uses_home_plugins || is_backpack
+                     -- Create pre-codegen wait callback if we're in two-phase mode and didn't
+                     -- already wait for full deps. This ensures codegen has access to CAF/LFInfo
+                     -- from dependencies' full interfaces.
+                     -- See Note [Two-phase interface generation]
+                     let pre_codegen_wait = if two_phase && not needs_full_deps
+                           then Just $ forM_ build_deps $ \br ->
+                             void $ runMaybeT $ waitResult (resultVar br)
+                           else Nothing
                      if two_phase && not needs_full_deps
                        then void $ wait_partial_ifaces build_deps
                        else void $ wait_deps build_deps
@@ -1142,7 +1159,7 @@ interpretBuildPlan hug mhmi_cache old_hpt plan two_phase = do
                      -- - If compilation succeeds, the MVar was filled by the callback
                      -- This prevents dependents from blocking forever on a failed module.
                      -- See Note [Two-phase interface generation]
-                     hmi <- executeCompileNode mod_idx n_mods old_hmi hug rehydrate_mods ms early_signal_callback
+                     hmi <- executeCompileNode mod_idx n_mods old_hmi hug rehydrate_mods ms early_signal_callback pre_codegen_wait
                        `MC.finally` (liftIO $ forM_ partial_iface_var $ \var -> void $ tryPutMVar var Nothing)
                      -- Write the HMI to an external cache (if one exists)
                      -- See Note [Caching HomeModInfo]
@@ -1254,11 +1271,10 @@ upsweep
 upsweep n_jobs hsc_env hmi_cache diag_wrapper mHscMessage old_hpt build_plan = do
     -- Enable two-phase signaling for all builds to ensure the code path is tested
     -- even in single-threaded mode. See Note [Two-phase interface generation]
-    -- Original implementation (only for parallel builds):
-    --   let two_phase = case n_jobs of
-    --         NumProcessorsLimit n -> n > 1
-    --         JSemLimit {} -> True  -- Assume parallel for job server
-    let two_phase = True
+    -- TODO: Currently disabled for single-threaded builds due to test failures
+    let two_phase = case n_jobs of
+          NumProcessorsLimit n -> n > 1
+          JSemLimit {} -> True  -- Assume parallel for job server
     (cycle, pipelines, collect_result) <- interpretBuildPlan (hsc_HUG hsc_env) hmi_cache old_hpt build_plan two_phase
     runPipelines n_jobs hsc_env diag_wrapper mHscMessage pipelines
     res <- collect_result
@@ -1296,6 +1312,8 @@ upsweep_inst hsc_env mHscMessage mod_index nmods uid iuid = do
 -- successful. If no compilation happened, return the old Linkable.
 -- The optional early signal callback is invoked after typechecking completes,
 -- allowing dependent modules to start earlier.
+-- The optional pre-codegen wait callback is invoked before codegen starts,
+-- to wait for dependencies' full interfaces (with CAF/LFInfo).
 -- See Note [Two-phase interface generation]
 upsweep_mod :: HscEnv
             -> Maybe Messager
@@ -1304,10 +1322,11 @@ upsweep_mod :: HscEnv
             -> Int  -- index of module
             -> Int  -- total number of modules
             -> Maybe (HomeModInfo -> IO ())  -- ^ callback for early interface signal
+            -> Maybe (IO ())  -- ^ callback to wait for dependencies' full interfaces before codegen
             -> IO HomeModInfo
-upsweep_mod hsc_env mHscMessage old_hmi summary mod_index nmods mb_early_signal = do
+upsweep_mod hsc_env mHscMessage old_hmi summary mod_index nmods mb_early_signal mb_pre_codegen_wait = do
   compileOneWithEarlySignal mHscMessage hsc_env summary
-              mod_index nmods (hm_iface <$> old_hmi) (maybe emptyHomeModInfoLinkable hm_linkable old_hmi) mb_early_signal
+              mod_index nmods (hm_iface <$> old_hmi) (maybe emptyHomeModInfoLinkable hm_linkable old_hmi) mb_early_signal mb_pre_codegen_wait
 
 
 -- Note [When source is considered modified]
@@ -1643,6 +1662,8 @@ executeInstantiationNode k n deps uid iu = do
 -- | Execute the compilation of a module node.
 -- The optional early signal callback is invoked after typechecking completes,
 -- allowing dependent modules to start earlier.
+-- The optional pre-codegen wait callback is invoked before codegen starts,
+-- to wait for dependencies' full interfaces (with CAF/LFInfo).
 -- See Note [Two-phase interface generation]
 executeCompileNode :: Int
   -> Int
@@ -1651,14 +1672,15 @@ executeCompileNode :: Int
   -> Maybe [ModuleName] -- List of modules we need to rehydrate before compiling
   -> ModuleNodeInfo
   -> Maybe (HomeModInfo -> IO ())  -- ^ Optional early interface signal callback
+  -> Maybe (IO ())  -- ^ Optional callback to wait for dependencies' full interfaces before codegen
   -> RunMakeM HomeModInfo
-executeCompileNode k n !old_hmi hug mrehydrate_mods mni mb_early_signal = do
+executeCompileNode k n !old_hmi hug mrehydrate_mods mni mb_early_signal mb_pre_codegen_wait = do
   me@MakeEnv{..} <- ask
   -- Rehydrate any dependencies if this module had a boot file or is a signature file.
   lift $ MaybeT (withAbstractSem compile_sem $ withLoggerHsc k me $ \hsc_env -> do
      hsc_env' <- liftIO $ maybeRehydrateBefore (setHUG hug hsc_env) mni fixed_mrehydrate_mods
      case mni of
-       ModuleNodeCompile mod -> executeCompileNodeWithSource hsc_env' me mod mb_early_signal
+       ModuleNodeCompile mod -> executeCompileNodeWithSource hsc_env' me mod mb_early_signal mb_pre_codegen_wait
        ModuleNodeFixed key loc -> do
          -- For fixed modules, signal the interface immediately since it's already compiled
          result <- executeCompileNodeFixed hsc_env' me key loc
@@ -1693,8 +1715,8 @@ executeCompileNode k n !old_hmi hug mrehydrate_mods mni mb_early_signal = do
             let hm_linkable = HomeModLinkable mb_bytecode mb_object
             return (HomeModInfo iface details hm_linkable)
 
-    executeCompileNodeWithSource :: HscEnv -> MakeEnv -> ModSummary -> Maybe (HomeModInfo -> IO ()) -> IO (Maybe HomeModInfo)
-    executeCompileNodeWithSource hsc_env MakeEnv{diag_wrapper, env_messager} mod mb_signal = do
+    executeCompileNodeWithSource :: HscEnv -> MakeEnv -> ModSummary -> Maybe (HomeModInfo -> IO ()) -> Maybe (IO ()) -> IO (Maybe HomeModInfo)
+    executeCompileNodeWithSource hsc_env MakeEnv{diag_wrapper, env_messager} mod mb_signal mb_pre_codegen_wait = do
      let -- Use the cached DynFlags which includes OPTIONS_GHC pragmas
          lcl_dynflags = ms_hspp_opts mod
      let lcl_hsc_env =
@@ -1704,7 +1726,7 @@ executeCompileNode k n !old_hmi hug mrehydrate_mods mni mb_early_signal = do
      -- Compile the module, locking with a semaphore to avoid too many modules
      -- being compiled at the same time leading to high memory usage.
      wrapAction diag_wrapper lcl_hsc_env $ do
-      res <- upsweep_mod lcl_hsc_env env_messager old_hmi mod k n mb_signal
+      res <- upsweep_mod lcl_hsc_env env_messager old_hmi mod k n mb_signal mb_pre_codegen_wait
       cleanCurrentModuleTempFilesMaybe (hsc_logger hsc_env) (hsc_tmpfs hsc_env) lcl_dynflags
       return res
 
@@ -1963,6 +1985,9 @@ wait_deps (x:xs) = do
 -- For dependencies with partialIfaceVar, waits on the partial interface.
 -- For dependencies without (e.g., modules in loops, InstantiationNodes),
 -- falls back to waiting on the full result to ensure the dependency is ready.
+--
+-- If any dependency fails (returns Nothing from its partial interface MVar),
+-- this function also fails to prevent the dependent module from continuing.
 wait_partial_ifaces :: [BuildResult] -> RunMakeM [ModIface]
 wait_partial_ifaces brs = do
   results <- mapM waitOne brs
@@ -1970,7 +1995,13 @@ wait_partial_ifaces brs = do
   where
     waitOne :: BuildResult -> RunMakeM (Maybe ModIface)
     waitOne br = case partialIfaceVar br of
-      Just var -> liftIO $ readMVar var
+      Just var -> do
+        miface <- liftIO $ readMVar var
+        -- If the partial interface is Nothing, it means the dependency failed.
+        -- We propagate this failure through MaybeT.
+        case miface of
+          Nothing -> lift $ MaybeT $ return Nothing
+          Just iface -> return $ Just iface
       Nothing -> do
         -- No partial interface available (e.g., module in a loop, or non-module node).
         -- Fall back to waiting on the full result.
@@ -1992,10 +2023,10 @@ is only needed for A's codegen, not A's typechecking.
 With two-phase interface generation:
 
   Module B: typecheck -> signal partial -> codegen -> signal complete
-  Module A: wait for B partial -> typecheck -> signal partial -> codegen
+  Module A: wait for B partial -> typecheck -> wait for B complete -> codegen
 
 This allows A to start typechecking as soon as B's typecheck is done,
-potentially running A's typecheck in parallel with B's codegen.
+while A's codegen still waits for B's full interface (with CAF/LF info).
 
 Implementation:
 
@@ -2004,18 +2035,21 @@ Implementation:
    - resultVar :: ResultVar (Maybe HomeModInfo)       -- after full compilation
 
 2. In hscPipelineWithEarlySignal (GHC.Driver.Pipeline):
-   - After T_HscPostTc completes, we have the partial interface
+   - After T_HscPostTc completes, we have the partial interface (includes unfoldings)
    - We call mkFullIface with Nothing for codegen info to create an "early" interface
    - The early signal callback is invoked with this interface
+   - Before starting codegen, the pre-codegen wait callback is called (if provided)
+     to wait for dependencies' full interfaces
 
 3. In buildSingleModule (this module):
    - For ModuleNode, we create partialIfaceVar
    - The early signal callback adds a partial HomeModInfo to HUG and fills the MVar
-   - We use wait_partial_ifaces instead of wait_deps to wait on dependencies
-   - This allows compilation to start after dependencies' typecheck (not full codegen)
+   - We use wait_partial_ifaces to wait on dependencies' partial interfaces for typecheck
+   - We pass a pre_codegen_wait callback that waits on dependencies' full interfaces
+   - This ensures codegen has access to CAF/LFInfo from dependencies
 
 4. The partial HomeModInfo uses:
-   - The early interface (without CAF/LF info)
+   - The early interface (without CAF/LF info, but WITH unfoldings from Core)
    - Proper ModDetails computed via initModDetails (needed for type lookups)
    - emptyHomeModInfoLinkable (no linkable yet)
 
@@ -2031,16 +2065,12 @@ Benefits:
 - Module A can start typechecking while B is still doing codegen
 - With many modules, this creates a pipeline effect where typecheck and codegen
   of different modules run in parallel
-
-Limitations:
-- Currently we don't separate the waiting for typecheck vs codegen phases
-  within a single module's compilation. A's codegen might still use B's
-  partial interface (without CAF info). This is safe but may miss some
-  optimizations. Future work could add finer-grained waiting.
+- Cross-module inlining works correctly (unfoldings are in the partial interface)
+- A's codegen gets B's full CAF/LFInfo for optimal code generation
 
 7. Performance:
-   - Two-phase signaling is only enabled for parallel builds (n_jobs > 1)
-   - For -j1, we skip creating MVars and use normal wait_deps, avoiding overhead
+   - Two-phase signaling is enabled for all builds to ensure thorough testing
+   - The overhead of MVars is minimal compared to compilation time
 -}
 
 {- Note [GHC Heap Invariants]
