@@ -1116,32 +1116,12 @@ interpretBuildPlan hug mhmi_cache old_hpt plan two_phase = do
                         -- This ensures the module is in HUG when dependents start running.
                         putMVar var (Just (hm_iface partial_hmi))
                       Nothing -> Nothing
-                -- Check if a plugin module is a home module (in the build graph)
+                -- Check if this module needs full deps (not just partial interfaces)
                 let home_mod_names = mapMaybe nodeKeyModName (M.keys build_map)
-                    isHomePlugin pluginMod = pluginMod `elem` home_mod_names
                 return $ withCurrentUnit (mgNodeUnitId mod) $ do
-                     -- For two-phase builds, wait for partial interfaces (allows earlier start)
-                     -- For single-threaded builds, wait for full results (no benefit from two-phase)
-                     -- EXCEPTIONS: We must wait for full results when:
-                     -- 1. Rehydration is needed (hs-boot files) - maybeRehydrateBefore needs complete HomeModInfo
-                     -- 2. Template Haskell/QuasiQuotes is used - TH splices need to run code from dependencies
-                     -- 3. Home-module plugins are used - plugins need to be loaded and executed
-                     -- 4. Module is in an instantiating unit (backpack) - needs InstantiationNode to complete
-                     --    This covers both VirtUnit modules and modules compiled during instantiation
+                     -- See Note [Two-phase interface generation] for details on when we need full deps.
                      hsc_env <- asks hsc_env
-                     let (uses_th, uses_home_plugins) = case ms of
-                           ModuleNodeCompile modsummary ->
-                             ( isTemplateHaskellOrQQNonBoot modsummary
-                             , any isHomePlugin (pluginModNames (ms_hspp_opts modsummary))
-                             )
-                           ModuleNodeFixed _ _ -> (False, False)  -- Fixed modules are already compiled
-                     -- Check if the home unit is using backpack features (instantiating or indefinite)
-                     -- In this case, we need to wait for full deps so InstantiationNode or
-                     -- signature merging can complete before dependent modules start
-                     let is_backpack = case hsc_home_unit_maybe hsc_env of
-                           Just hu -> isHomeUnitInstantiating hu || isHomeUnitIndefinite hu
-                           Nothing -> False
-                     let needs_full_deps = isJust rehydrate_mods || uses_th || uses_home_plugins || is_backpack
+                     let needs_full_deps = isJust $ needsFullDeps hsc_env ms rehydrate_mods home_mod_names
                      -- Create pre-codegen wait callback if we're in two-phase mode and didn't
                      -- already wait for full deps. This ensures codegen has access to CAF/LFInfo
                      -- from dependencies' full interfaces.
@@ -1150,14 +1130,8 @@ interpretBuildPlan hug mhmi_cache old_hpt plan two_phase = do
                            then Just $ forM_ build_deps $ \br ->
                              void $ runMaybeT $ waitResult (resultVar br)
                            else Nothing
-                     -- The 'finally' ensures partialIfaceVar is filled even on failure:
-                     -- - If wait_partial_ifaces fails (dep failed), fill with Nothing
-                     -- - If compilation fails before early_signal_callback runs, fill with Nothing
-                     -- - If early_signal_callback already ran, tryPutMVar is a no-op (MVar already full)
-                     -- - If compilation succeeds, the MVar was filled by the callback
-                     -- This prevents dependents from blocking forever on a failed module.
-                     -- See Note [Two-phase interface generation]
-                     (do
+                     -- See Note [Two-phase interface generation] for why this guard is needed.
+                     withPartialIfaceGuard partial_iface_var $ do
                        if two_phase && not needs_full_deps
                          then void $ wait_partial_ifaces build_deps
                          else void $ wait_deps build_deps
@@ -1169,8 +1143,7 @@ interpretBuildPlan hug mhmi_cache old_hpt plan two_phase = do
                        -- partial HomeModInfo that was added by early_signal_callback during
                        -- two-phase compilation. See Note [Two-phase interface generation].
                        liftIO $ HUG.addHomeModInfoToHug hmi hug
-                       return (Just hmi))
-                       `MC.finally` (liftIO $ forM_ partial_iface_var $ \var -> void $ tryPutMVar var Nothing)
+                       return (Just hmi)
               LinkNode _nks uid -> do
                   mod_idx <- nodeId
                   return $ withCurrentUnit (mgNodeUnitId mod) $ do
@@ -1967,57 +1940,114 @@ executeLinkNode hug kn@(k, _) uid deps = do
       Failed -> fail "Link Failed"
       Succeeded -> return ()
 
+-- | Reasons why a module must wait for full dependency results (not just partial interfaces).
+-- See Note [Two-phase interface generation]
+data FullDepsReason
+    = NeedsRehydration      -- ^ Has hs-boot files, needs complete HomeModInfo
+    | UsesTemplateHaskell   -- ^ TH splices need to run code from dependencies
+    | UsesHomePlugins       -- ^ Home-module plugins must be loaded first
+    | IsBackpackModule      -- ^ Backpack units need InstantiationNode to complete
+
+-- | Determine if a module needs full dependency results before typechecking.
+-- Returns Nothing if partial interfaces suffice, Just reason otherwise.
+-- See Note [Two-phase interface generation]
+needsFullDeps :: HscEnv
+              -> ModuleNodeInfo
+              -> Maybe [ModuleName]  -- ^ Rehydration modules (hs-boot files)
+              -> [ModuleName]        -- ^ Home module names (for plugin checking)
+              -> Maybe FullDepsReason
+needsFullDeps hsc_env mni rehydrate_mods home_mod_names
+    | isJust rehydrate_mods = Just NeedsRehydration
+    | uses_th               = Just UsesTemplateHaskell
+    | uses_home_plugins     = Just UsesHomePlugins
+    | is_backpack           = Just IsBackpackModule
+    | otherwise             = Nothing
+  where
+    (uses_th, uses_home_plugins) = case mni of
+        ModuleNodeCompile ms ->
+            ( isTemplateHaskellOrQQNonBoot ms
+            , any isHomePlugin (pluginModNames (ms_hspp_opts ms))
+            )
+        ModuleNodeFixed _ _ -> (False, False)
+
+    -- Check if the home unit is using backpack features (instantiating or indefinite)
+    is_backpack = case hsc_home_unit_maybe hsc_env of
+        Just hu -> isHomeUnitInstantiating hu || isHomeUnitIndefinite hu
+        Nothing -> False
+
+    isHomePlugin pluginMod = pluginMod `elem` home_mod_names
+
+-- | Run a module action, guaranteeing partial_iface_var is filled with Nothing on exit.
+-- This prevents dependent modules from blocking forever if this module fails.
+-- The 'finally' ensures the MVar is filled even if:
+-- - Waiting on dependencies fails (dep failed)
+-- - Compilation fails before early_signal_callback runs
+-- - An async exception is thrown
+-- If early_signal_callback already ran, tryPutMVar is a no-op (MVar already full).
+-- See Note [Two-phase interface generation]
+withPartialIfaceGuard :: Maybe (MVar (Maybe ModIface))
+                      -> RunMakeM a
+                      -> RunMakeM a
+withPartialIfaceGuard mvar action =
+    action `MC.finally` (liftIO $ forM_ mvar $ \v -> void $ tryPutMVar v Nothing)
+
+-- | Wait mode determines what to wait for from each dependency.
+-- See Note [Two-phase interface generation]
+data WaitMode
+    = WaitFullResult      -- ^ Wait for complete HomeModInfo (traditional)
+    | WaitPartialIface    -- ^ Wait for partial interface (two-phase)
+
+-- | Wait for dependencies according to the specified mode.
+-- Returns the interfaces, filtering out failed/non-module deps.
+-- See Note [Two-phase interface generation]
+waitDependencies :: WaitMode -> [BuildResult] -> RunMakeM [ModIface]
+waitDependencies _mode [] = return []
+waitDependencies mode (br:brs) = do
+    miface <- waitOne mode br
+    ifaces <- waitDependencies mode brs
+    return $ maybe ifaces (:ifaces) miface
+  where
+    -- Wait for one dependency according to the mode
+    waitOne :: WaitMode -> BuildResult -> RunMakeM (Maybe ModIface)
+    waitOne WaitFullResult br' = do
+        mhmi <- lift $ waitResult (resultVar br')
+        return $ hm_iface <$> mhmi
+
+    waitOne WaitPartialIface br' = case partialIfaceVar br' of
+        Just var -> do
+            -- Wait for partial interface to be ready
+            miface <- liftIO $ readMVar var
+            case miface of
+                Just iface -> return $ Just iface
+                Nothing -> do
+                    -- Partial interface is Nothing, meaning the dependency failed.
+                    -- The withPartialIfaceGuard fills the MVar with Nothing when
+                    -- compilation fails before early_signal_callback runs.
+                    -- We must fail via MaybeT to propagate the failure.
+                    -- We do this by waiting on resultVar, which will fail via MaybeT
+                    -- since the module failed.
+                    _ <- lift $ waitResult (resultVar br')
+                    -- If we somehow get here (shouldn't happen), return Nothing
+                    return Nothing
+        Nothing ->
+            -- No partial interface available (e.g., module in a loop, or non-module node).
+            -- Fall back to waiting on the full result.
+            waitOne WaitFullResult br'
+
 -- | Wait for dependencies to finish, and then return their results.
+-- This is the traditional mode that waits for complete HomeModInfo.
 wait_deps :: [BuildResult] -> RunMakeM [HomeModInfo]
 wait_deps [] = return []
 wait_deps (x:xs) = do
-  res <- lift $ waitResult (resultVar x)
-  hmis <- wait_deps xs
-  case res of
-    Nothing -> return hmis
-    Just hmi -> return (hmi:hmis)
+    res <- lift $ waitResult (resultVar x)
+    hmis <- wait_deps xs
+    return $ maybe hmis (:hmis) res
 
 -- | Wait for partial interfaces of dependencies to be ready.
 -- This allows dependent modules to start typechecking earlier.
 -- See Note [Two-phase interface generation]
---
--- For dependencies with partialIfaceVar, waits on the partial interface.
--- For dependencies without (e.g., modules in loops, InstantiationNodes),
--- falls back to waiting on the full result to ensure the dependency is ready.
---
--- If a dependency fails, this function fails via MaybeT (matching wait_deps behavior).
--- This ensures proper error propagation: if B fails, A doesn't try to compile.
 wait_partial_ifaces :: [BuildResult] -> RunMakeM [ModIface]
-wait_partial_ifaces [] = return []
-wait_partial_ifaces (br:brs) = do
-  miface <- waitOne br
-  ifaces <- wait_partial_ifaces brs
-  case miface of
-    Nothing -> return ifaces  -- Non-module node (Link/Unit), skip it
-    Just iface -> return (iface:ifaces)
-  where
-    waitOne :: BuildResult -> RunMakeM (Maybe ModIface)
-    waitOne br' = case partialIfaceVar br' of
-      Just var -> do
-        -- Wait for partial interface to be ready
-        miface <- liftIO $ readMVar var
-        case miface of
-          Just iface -> return $ Just iface
-          Nothing -> do
-            -- Partial interface is Nothing, meaning the dependency failed.
-            -- The 'finally' clause fills the MVar with Nothing when compilation
-            -- fails before early_signal_callback runs.
-            -- We must fail via MaybeT to propagate the failure (like wait_deps).
-            -- We do this by waiting on resultVar, which will fail via MaybeT
-            -- since the module failed.
-            _ <- lift $ waitResult (resultVar br')
-            -- If we somehow get here (shouldn't happen), return Nothing
-            return Nothing
-      Nothing -> do
-        -- No partial interface available (e.g., module in a loop, or non-module node).
-        -- Fall back to waiting on the full result.
-        mhmi <- lift $ waitResult (resultVar br')
-        return $ hm_iface <$> mhmi
+wait_partial_ifaces = waitDependencies WaitPartialIface
 
 {- Note [Two-phase interface generation]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -2055,7 +2085,8 @@ Implementation:
 3. In buildSingleModule (this module):
    - For ModuleNode, we create partialIfaceVar
    - The early signal callback adds a partial HomeModInfo to HUG and fills the MVar
-   - We use wait_partial_ifaces to wait on dependencies' partial interfaces for typecheck
+   - We use waitDependencies with WaitPartialIface to wait on dependencies' partial
+     interfaces for typecheck
    - We pass a pre_codegen_wait callback that waits on dependencies' full interfaces
    - This ensures codegen has access to CAF/LFInfo from dependencies
 
@@ -2064,13 +2095,30 @@ Implementation:
    - Proper ModDetails computed via initModDetails (needed for type lookups)
    - emptyHomeModInfoLinkable (no linkable yet)
 
-5. Error handling:
-   - If compilation fails, we use 'finally' to ensure partialIfaceVar is filled
-     with Nothing, preventing dependents from blocking forever.
+5. Error handling with withPartialIfaceGuard:
+   - The withPartialIfaceGuard helper wraps the module action and guarantees
+     partialIfaceVar is filled with Nothing on exit (using MC.finally)
+   - This prevents dependents from blocking forever if compilation fails before
+     the early_signal_callback runs
+   - If early_signal_callback already ran, tryPutMVar is a no-op (MVar already full)
 
 6. After full compilation:
    - The full HomeModInfo replaces the partial one in HUG
    - The resultVar is filled with the complete result
+
+7. Wait mode abstraction:
+   - WaitMode determines what to wait for from each dependency:
+     * WaitFullResult: Wait for complete HomeModInfo (traditional mode)
+     * WaitPartialIface: Wait for partial interface only (two-phase mode)
+   - waitDependencies is the unified function that handles both modes
+   - wait_partial_ifaces and wait_deps are simple wrappers for convenience
+
+8. needsFullDeps and FullDepsReason:
+   - Some modules cannot use two-phase waiting and must wait for full results:
+     * NeedsRehydration: Has hs-boot files, needs complete HomeModInfo for rehydration
+     * UsesTemplateHaskell: TH splices need to run code from dependencies
+     * UsesHomePlugins: Home-module plugins must be loaded and executed first
+     * IsBackpackModule: Backpack units need InstantiationNode to complete first
 
 Benefits:
 - Module A can start typechecking while B is still doing codegen
@@ -2079,7 +2127,7 @@ Benefits:
 - Cross-module inlining works correctly (unfoldings are in the partial interface)
 - A's codegen gets B's full CAF/LFInfo for optimal code generation
 
-7. Performance:
+9. Performance:
    - Two-phase signaling is enabled for all builds to ensure thorough testing
    - The overhead of MVars is minimal compared to compilation time
 -}
