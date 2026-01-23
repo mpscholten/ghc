@@ -1252,11 +1252,13 @@ upsweep
     -> [BuildPlan]
     -> IO (SuccessFlag, [HomeModInfo])
 upsweep n_jobs hsc_env hmi_cache diag_wrapper mHscMessage old_hpt build_plan = do
-    -- Enable two-phase signaling only for parallel builds (n_jobs > 1)
-    -- See Note [Two-phase interface generation]
-    let two_phase = case n_jobs of
-          NumProcessorsLimit n -> n > 1
-          JSemLimit {} -> True  -- Assume parallel for job server
+    -- Enable two-phase signaling for all builds to ensure the code path is tested
+    -- even in single-threaded mode. See Note [Two-phase interface generation]
+    -- Original implementation (only for parallel builds):
+    --   let two_phase = case n_jobs of
+    --         NumProcessorsLimit n -> n > 1
+    --         JSemLimit {} -> True  -- Assume parallel for job server
+    let two_phase = True
     (cycle, pipelines, collect_result) <- interpretBuildPlan (hsc_HUG hsc_env) hmi_cache old_hpt build_plan two_phase
     runPipelines n_jobs hsc_env diag_wrapper mHscMessage pipelines
     res <- collect_result
