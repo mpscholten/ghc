@@ -1150,25 +1150,27 @@ interpretBuildPlan hug mhmi_cache old_hpt plan two_phase = do
                            then Just $ forM_ build_deps $ \br ->
                              void $ runMaybeT $ waitResult (resultVar br)
                            else Nothing
-                     if two_phase && not needs_full_deps
-                       then void $ wait_partial_ifaces build_deps
-                       else void $ wait_deps build_deps
                      -- The 'finally' ensures partialIfaceVar is filled even on failure:
-                     -- - If compilation fails before early_signal_callback runs, we fill with Nothing
+                     -- - If wait_partial_ifaces fails (dep failed), fill with Nothing
+                     -- - If compilation fails before early_signal_callback runs, fill with Nothing
                      -- - If early_signal_callback already ran, tryPutMVar is a no-op (MVar already full)
                      -- - If compilation succeeds, the MVar was filled by the callback
                      -- This prevents dependents from blocking forever on a failed module.
                      -- See Note [Two-phase interface generation]
-                     hmi <- executeCompileNode mod_idx n_mods old_hmi hug rehydrate_mods ms early_signal_callback pre_codegen_wait
+                     (do
+                       if two_phase && not needs_full_deps
+                         then void $ wait_partial_ifaces build_deps
+                         else void $ wait_deps build_deps
+                       hmi <- executeCompileNode mod_idx n_mods old_hmi hug rehydrate_mods ms early_signal_callback pre_codegen_wait
+                       -- Write the HMI to an external cache (if one exists)
+                       -- See Note [Caching HomeModInfo]
+                       liftIO $ forM mhmi_cache $ \hmi_cache -> addHmiToCache hmi_cache hmi
+                       -- Add the full HomeModInfo to HUG. This intentionally replaces any
+                       -- partial HomeModInfo that was added by early_signal_callback during
+                       -- two-phase compilation. See Note [Two-phase interface generation].
+                       liftIO $ HUG.addHomeModInfoToHug hmi hug
+                       return (Just hmi))
                        `MC.finally` (liftIO $ forM_ partial_iface_var $ \var -> void $ tryPutMVar var Nothing)
-                     -- Write the HMI to an external cache (if one exists)
-                     -- See Note [Caching HomeModInfo]
-                     liftIO $ forM mhmi_cache $ \hmi_cache -> addHmiToCache hmi_cache hmi
-                     -- Add the full HomeModInfo to HUG. This intentionally replaces any
-                     -- partial HomeModInfo that was added by early_signal_callback during
-                     -- two-phase compilation. See Note [Two-phase interface generation].
-                     liftIO $ HUG.addHomeModInfoToHug hmi hug
-                     return (Just hmi)
               LinkNode _nks uid -> do
                   mod_idx <- nodeId
                   return $ withCurrentUnit (mgNodeUnitId mod) $ do
@@ -1271,10 +1273,7 @@ upsweep
 upsweep n_jobs hsc_env hmi_cache diag_wrapper mHscMessage old_hpt build_plan = do
     -- Enable two-phase signaling for all builds to ensure the code path is tested
     -- even in single-threaded mode. See Note [Two-phase interface generation]
-    -- TODO: Currently disabled for single-threaded builds due to test failures
-    let two_phase = case n_jobs of
-          NumProcessorsLimit n -> n > 1
-          JSemLimit {} -> True  -- Assume parallel for job server
+    let two_phase = True
     (cycle, pipelines, collect_result) <- interpretBuildPlan (hsc_HUG hsc_env) hmi_cache old_hpt build_plan two_phase
     runPipelines n_jobs hsc_env diag_wrapper mHscMessage pipelines
     res <- collect_result
@@ -1986,26 +1985,38 @@ wait_deps (x:xs) = do
 -- For dependencies without (e.g., modules in loops, InstantiationNodes),
 -- falls back to waiting on the full result to ensure the dependency is ready.
 --
--- If any dependency fails (returns Nothing from its partial interface MVar),
--- this function also fails to prevent the dependent module from continuing.
+-- If a dependency fails, this function fails via MaybeT (matching wait_deps behavior).
+-- This ensures proper error propagation: if B fails, A doesn't try to compile.
 wait_partial_ifaces :: [BuildResult] -> RunMakeM [ModIface]
-wait_partial_ifaces brs = do
-  results <- mapM waitOne brs
-  return $ catMaybes results
+wait_partial_ifaces [] = return []
+wait_partial_ifaces (br:brs) = do
+  miface <- waitOne br
+  ifaces <- wait_partial_ifaces brs
+  case miface of
+    Nothing -> return ifaces  -- Non-module node (Link/Unit), skip it
+    Just iface -> return (iface:ifaces)
   where
     waitOne :: BuildResult -> RunMakeM (Maybe ModIface)
-    waitOne br = case partialIfaceVar br of
+    waitOne br' = case partialIfaceVar br' of
       Just var -> do
+        -- Wait for partial interface to be ready
         miface <- liftIO $ readMVar var
-        -- If the partial interface is Nothing, it means the dependency failed.
-        -- We propagate this failure through MaybeT.
         case miface of
-          Nothing -> lift $ MaybeT $ return Nothing
           Just iface -> return $ Just iface
+          Nothing -> do
+            -- Partial interface is Nothing, meaning the dependency failed.
+            -- The 'finally' clause fills the MVar with Nothing when compilation
+            -- fails before early_signal_callback runs.
+            -- We must fail via MaybeT to propagate the failure (like wait_deps).
+            -- We do this by waiting on resultVar, which will fail via MaybeT
+            -- since the module failed.
+            _ <- lift $ waitResult (resultVar br')
+            -- If we somehow get here (shouldn't happen), return Nothing
+            return Nothing
       Nothing -> do
         -- No partial interface available (e.g., module in a loop, or non-module node).
         -- Fall back to waiting on the full result.
-        mhmi <- lift $ waitResult (resultVar br)
+        mhmi <- lift $ waitResult (resultVar br')
         return $ hm_iface <$> mhmi
 
 {- Note [Two-phase interface generation]
