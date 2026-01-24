@@ -919,6 +919,7 @@ hscPipelineWithEarlySignal pipe_env (hsc_env_with_plugins, mod_sum, hsc_recomp_s
       return (iface, mb_linkable, mb_early_details)
     HscRecompNeeded mb_old_hash -> do
       (tc_result, warnings) <- use (T_Hsc hsc_env_with_plugins mod_sum)
+
       hscBackendAction <- use (T_HscPostTc hsc_env_with_plugins mod_sum tc_result warnings mb_old_hash)
       -- Signal partial interface is ready (before codegen)
       -- Create an "early" HomeModInfo with proper ModDetails for dependents to use
@@ -929,8 +930,8 @@ hscPipelineWithEarlySignal pipe_env (hsc_env_with_plugins, mod_sum, hsc_recomp_s
           case hscBackendAction of
             HscRecomp { hscs_partial_iface = partial_iface } -> do
               -- Create early interface without codegen info (no CAF/LF info)
-              -- Use mkEarlyIface which skips expensive fingerprinting and sharing
-              let early_iface = mkEarlyIface partial_iface
+              -- but with real fingerprints so dependents can desugar
+              early_iface <- mkEarlyIface hsc_env_with_plugins partial_iface
               -- Compute ModDetails so dependents can look up types
               early_details <- initModDetails hsc_env_with_plugins early_iface
               signal (HomeModInfo early_iface early_details emptyHomeModInfoLinkable)
@@ -940,10 +941,6 @@ hscPipelineWithEarlySignal pipe_env (hsc_env_with_plugins, mod_sum, hsc_recomp_s
               signal (HomeModInfo iface details emptyHomeModInfoLinkable)
               return (Just details)
         Nothing -> return Nothing
-      -- Wait for dependencies' full interfaces before starting codegen
-      -- This ensures we have CAF/LFInfo for optimal code generation
-      -- See Note [Two-phase interface generation] in GHC.Driver.Make
-      liftIO $ forM_ mb_pre_codegen_wait id
       (iface, linkables) <- hscBackendPipeline pipe_env hsc_env_with_plugins mod_sum hscBackendAction
       return (iface, linkables, mb_early_details)
 
