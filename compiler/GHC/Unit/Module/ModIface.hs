@@ -107,6 +107,8 @@ module GHC.Unit.Module.ModIface
    , renameFreeHoles
    , emptyPartialModIface
    , emptyFullModIface
+   , emptyIfaceBackend
+   , emptyModIfaceCache
    , mkIfaceHashCache
    , emptyIfaceHashCache
    , forceModIface
