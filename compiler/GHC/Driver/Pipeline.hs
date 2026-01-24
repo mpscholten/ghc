@@ -233,9 +233,9 @@ compileOne' :: Maybe Messager
             -> IO HomeModInfo   -- ^ the complete HomeModInfo, if successful
 
 compileOne' mHscMessage hsc_env0 summary mod_index nmods mb_old_iface mb_old_linkable =
-  -- Delegate to compileOneWithEarlySignal with no callbacks
+  -- Delegate to compileOneWithEarlySignal with no callback
   compileOneWithEarlySignal mHscMessage hsc_env0 summary mod_index nmods
-                            mb_old_iface mb_old_linkable Nothing Nothing
+                            mb_old_iface mb_old_linkable Nothing
 
 -- | Like 'compileOne'' but with an early interface signal callback.
 -- The callback is invoked after typechecking completes (before codegen),
@@ -250,11 +250,10 @@ compileOneWithEarlySignal
             -> Maybe ModIface  -- ^ old interface, if we have one
             -> HomeModLinkable
             -> Maybe (HomeModInfo -> IO ())  -- ^ callback for early interface signal
-            -> Maybe (IO ())  -- ^ callback to wait for dependencies' full interfaces before codegen
             -> IO HomeModInfo   -- ^ the complete HomeModInfo, if successful
 
 compileOneWithEarlySignal mHscMessage
-            hsc_env0 summary mod_index nmods mb_old_iface mb_old_linkable mb_early_signal mb_pre_codegen_wait
+            hsc_env0 summary mod_index nmods mb_old_iface mb_old_linkable mb_early_signal
  = do
 
    debugTraceMsg logger 2 (text "compile: input file" <+> text input_fnpp)
@@ -271,7 +270,7 @@ compileOneWithEarlySignal mHscMessage
    let pipe_env = mkPipeEnv NoStop input_fn Nothing pipelineOutput
    status <- hscRecompStatus mHscMessage plugin_hsc_env upd_summary
                 mb_old_iface mb_old_linkable (mod_index, nmods)
-   let pipeline = hscPipelineWithEarlySignal pipe_env (setDumpPrefix pipe_env plugin_hsc_env, upd_summary, status) mb_early_signal mb_pre_codegen_wait
+   let pipeline = hscPipelineWithEarlySignal pipe_env (setDumpPrefix pipe_env plugin_hsc_env, upd_summary, status) mb_early_signal
    (iface, linkable, mb_early_details) <- runPipeline (hsc_hooks plugin_hsc_env) pipeline
    -- See Note [ModDetails and --make mode]
    -- Reuse the early ModDetails if available, avoiding a second initModDetails call.
@@ -889,7 +888,7 @@ fullPipeline pipe_env hsc_env pp_fn src_flavour = do
 -- | Everything after preprocess
 hscPipeline :: P m => PipeEnv -> (HscEnv, ModSummary, HscRecompStatus) -> m (ModIface, RecompLinkables)
 hscPipeline pipe_env input = do
-  (iface, linkables, _mb_details) <- hscPipelineWithEarlySignal pipe_env input Nothing Nothing
+  (iface, linkables, _mb_details) <- hscPipelineWithEarlySignal pipe_env input Nothing
   return (iface, linkables)
 
 -- | Like 'hscPipeline' but with an optional callback that's invoked after
@@ -903,9 +902,8 @@ hscPipelineWithEarlySignal :: P m
   => PipeEnv
   -> (HscEnv, ModSummary, HscRecompStatus)
   -> Maybe (HomeModInfo -> IO ())  -- ^ Optional callback for early interface signaling
-  -> Maybe (IO ())  -- ^ Optional callback to wait for dependencies' full interfaces before codegen
   -> m (ModIface, RecompLinkables, Maybe ModDetails)
-hscPipelineWithEarlySignal pipe_env (hsc_env_with_plugins, mod_sum, hsc_recomp_status) mb_early_signal mb_pre_codegen_wait = do
+hscPipelineWithEarlySignal pipe_env (hsc_env_with_plugins, mod_sum, hsc_recomp_status) mb_early_signal = do
   case hsc_recomp_status of
     HscUpToDate iface mb_linkable -> do
       -- Module is up to date, signal the existing interface with proper ModDetails

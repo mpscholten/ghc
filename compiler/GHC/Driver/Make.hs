@@ -1122,20 +1122,12 @@ interpretBuildPlan hug mhmi_cache old_hpt plan two_phase = do
                      -- See Note [Two-phase interface generation] for details on when we need full deps.
                      hsc_env <- asks hsc_env
                      let needs_full_deps = isJust $ needsFullDeps hsc_env ms rehydrate_mods home_mod_names
-                     -- Create pre-codegen wait callback if we're in two-phase mode and didn't
-                     -- already wait for full deps. This ensures codegen has access to CAF/LFInfo
-                     -- from dependencies' full interfaces.
-                     -- See Note [Two-phase interface generation]
-                     let pre_codegen_wait = if two_phase && not needs_full_deps
-                           then Just $ forM_ build_deps $ \br ->
-                             void $ runMaybeT $ waitResult (resultVar br)
-                           else Nothing
                      -- See Note [Two-phase interface generation] for why this guard is needed.
                      withPartialIfaceGuard partial_iface_var $ do
                        if two_phase && not needs_full_deps
                          then void $ wait_partial_ifaces build_deps
                          else void $ wait_deps build_deps
-                       hmi <- executeCompileNode mod_idx n_mods old_hmi hug rehydrate_mods ms early_signal_callback pre_codegen_wait
+                       hmi <- executeCompileNode mod_idx n_mods old_hmi hug rehydrate_mods ms early_signal_callback
                        -- Write the HMI to an external cache (if one exists)
                        -- See Note [Caching HomeModInfo]
                        liftIO $ forM mhmi_cache $ \hmi_cache -> addHmiToCache hmi_cache hmi
@@ -1283,9 +1275,7 @@ upsweep_inst hsc_env mHscMessage mod_index nmods uid iuid = do
 -- | Compile a single module. Always produce a Linkable for it if
 -- successful. If no compilation happened, return the old Linkable.
 -- The optional early signal callback is invoked after typechecking completes,
--- allowing dependent modules to start earlier.
--- The optional pre-codegen wait callback is invoked before codegen starts,
--- to wait for dependencies' full interfaces (with CAF/LFInfo).
+-- allowing dependent modules to start earlier with the early interface.
 -- See Note [Two-phase interface generation]
 upsweep_mod :: HscEnv
             -> Maybe Messager
@@ -1294,11 +1284,10 @@ upsweep_mod :: HscEnv
             -> Int  -- index of module
             -> Int  -- total number of modules
             -> Maybe (HomeModInfo -> IO ())  -- ^ callback for early interface signal
-            -> Maybe (IO ())  -- ^ callback to wait for dependencies' full interfaces before codegen
             -> IO HomeModInfo
-upsweep_mod hsc_env mHscMessage old_hmi summary mod_index nmods mb_early_signal mb_pre_codegen_wait = do
+upsweep_mod hsc_env mHscMessage old_hmi summary mod_index nmods mb_early_signal = do
   compileOneWithEarlySignal mHscMessage hsc_env summary
-              mod_index nmods (hm_iface <$> old_hmi) (maybe emptyHomeModInfoLinkable hm_linkable old_hmi) mb_early_signal mb_pre_codegen_wait
+              mod_index nmods (hm_iface <$> old_hmi) (maybe emptyHomeModInfoLinkable hm_linkable old_hmi) mb_early_signal
 
 
 -- Note [When source is considered modified]
@@ -1634,8 +1623,6 @@ executeInstantiationNode k n deps uid iu = do
 -- | Execute the compilation of a module node.
 -- The optional early signal callback is invoked after typechecking completes,
 -- allowing dependent modules to start earlier.
--- The optional pre-codegen wait callback is invoked before codegen starts,
--- to wait for dependencies' full interfaces (with CAF/LFInfo).
 -- See Note [Two-phase interface generation]
 executeCompileNode :: Int
   -> Int
@@ -1644,15 +1631,14 @@ executeCompileNode :: Int
   -> Maybe [ModuleName] -- List of modules we need to rehydrate before compiling
   -> ModuleNodeInfo
   -> Maybe (HomeModInfo -> IO ())  -- ^ Optional early interface signal callback
-  -> Maybe (IO ())  -- ^ Optional callback to wait for dependencies' full interfaces before codegen
   -> RunMakeM HomeModInfo
-executeCompileNode k n !old_hmi hug mrehydrate_mods mni mb_early_signal mb_pre_codegen_wait = do
+executeCompileNode k n !old_hmi hug mrehydrate_mods mni mb_early_signal = do
   me@MakeEnv{..} <- ask
   -- Rehydrate any dependencies if this module had a boot file or is a signature file.
   lift $ MaybeT (withAbstractSem compile_sem $ withLoggerHsc k me $ \hsc_env -> do
      hsc_env' <- liftIO $ maybeRehydrateBefore (setHUG hug hsc_env) mni fixed_mrehydrate_mods
      case mni of
-       ModuleNodeCompile mod -> executeCompileNodeWithSource hsc_env' me mod mb_early_signal mb_pre_codegen_wait
+       ModuleNodeCompile mod -> executeCompileNodeWithSource hsc_env' me mod mb_early_signal
        ModuleNodeFixed key loc -> do
          -- For fixed modules, signal the interface immediately since it's already compiled
          result <- executeCompileNodeFixed hsc_env' me key loc
@@ -1687,8 +1673,8 @@ executeCompileNode k n !old_hmi hug mrehydrate_mods mni mb_early_signal mb_pre_c
             let hm_linkable = HomeModLinkable mb_bytecode mb_object
             return (HomeModInfo iface details hm_linkable)
 
-    executeCompileNodeWithSource :: HscEnv -> MakeEnv -> ModSummary -> Maybe (HomeModInfo -> IO ()) -> Maybe (IO ()) -> IO (Maybe HomeModInfo)
-    executeCompileNodeWithSource hsc_env MakeEnv{diag_wrapper, env_messager} mod mb_signal mb_pre_codegen_wait = do
+    executeCompileNodeWithSource :: HscEnv -> MakeEnv -> ModSummary -> Maybe (HomeModInfo -> IO ()) -> IO (Maybe HomeModInfo)
+    executeCompileNodeWithSource hsc_env MakeEnv{diag_wrapper, env_messager} mod mb_signal = do
      let -- Use the cached DynFlags which includes OPTIONS_GHC pragmas
          lcl_dynflags = ms_hspp_opts mod
      let lcl_hsc_env =
@@ -1698,7 +1684,7 @@ executeCompileNode k n !old_hmi hug mrehydrate_mods mni mb_early_signal mb_pre_c
      -- Compile the module, locking with a semaphore to avoid too many modules
      -- being compiled at the same time leading to high memory usage.
      wrapAction diag_wrapper lcl_hsc_env $ do
-      res <- upsweep_mod lcl_hsc_env env_messager old_hmi mod k n mb_signal mb_pre_codegen_wait
+      res <- upsweep_mod lcl_hsc_env env_messager old_hmi mod k n mb_signal
       cleanCurrentModuleTempFilesMaybe (hsc_logger hsc_env) (hsc_tmpfs hsc_env) lcl_dynflags
       return res
 
@@ -2055,19 +2041,35 @@ When compiling with -j, we want to maximize parallelism. In the standard
 compilation pipeline:
 
   Module B: typecheck -> codegen -> signal complete
-  Module A: wait for B complete -> typecheck -> codegen
+  Module A: wait for B complete -> typecheck -> desugar -> codegen
 
 Module A has to wait for B's codegen to finish, even though A only needs
-B's types (interface) to start typechecking. The codegen info (CAF/LF info)
-is only needed for A's codegen, not A's typechecking.
+B's types (interface) to typecheck and desugar. The codegen info (CAF/LF info)
+is only needed for A's codegen, not A's typechecking or desugaring.
 
 With two-phase interface generation:
 
-  Module B: typecheck -> signal partial -> codegen -> signal complete
-  Module A: wait for B partial -> typecheck -> wait for B complete -> codegen
+  Module B: typecheck -> signal early -> desugar -> codegen -> signal complete
+  Module A: wait for B early -> typecheck -> desugar -> codegen (async with B)
 
-This allows A to start typechecking as soon as B's typecheck is done,
-while A's codegen still waits for B's full interface (with CAF/LF info).
+This allows A to start typechecking and desugaring as soon as B's typecheck
+is done, while B continues with its own codegen in parallel.
+
+Key insight: Fingerprints do NOT depend on codegen info
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The crucial insight is that interface fingerprints only depend on:
+- Declaration structure (types, classes, instances)
+- Fixities, annotations, rules
+- Dependencies
+
+They do NOT depend on CAF info, LF info, or tag signatures. This means we can
+compute real fingerprints for early interfaces, which allows dependent modules
+to desugar (not just typecheck) against early interfaces. The `mkRecompUsageInfo`
+function uses fingerprints to record what the module depends on, and previously
+panicked when encountering early interfaces with dummy fingerprints.
+
+By calling `addFingerprints` in `mkEarlyIface` (in GHC.Iface.Make), we compute
+real fingerprints for early interfaces, enabling the full parallelism benefit.
 
 Implementation:
 
@@ -2077,21 +2079,18 @@ Implementation:
 
 2. In hscPipelineWithEarlySignal (GHC.Driver.Pipeline):
    - After T_HscPostTc completes, we have the partial interface (includes unfoldings)
-   - We call mkFullIface with Nothing for codegen info to create an "early" interface
+   - We call mkEarlyIface which uses addFingerprints to compute real fingerprints
+   - The early interface has real fingerprints but no CAF/LF info
    - The early signal callback is invoked with this interface
-   - Before starting codegen, the pre-codegen wait callback is called (if provided)
-     to wait for dependencies' full interfaces
 
 3. In buildSingleModule (this module):
    - For ModuleNode, we create partialIfaceVar
    - The early signal callback adds a partial HomeModInfo to HUG and fills the MVar
    - We use waitDependencies with WaitPartialIface to wait on dependencies' partial
-     interfaces for typecheck
-   - We pass a pre_codegen_wait callback that waits on dependencies' full interfaces
-   - This ensures codegen has access to CAF/LFInfo from dependencies
+     interfaces for typecheck and desugar
 
 4. The partial HomeModInfo uses:
-   - The early interface (without CAF/LF info, but WITH unfoldings from Core)
+   - The early interface (WITH fingerprints and unfoldings, WITHOUT CAF/LF info)
    - Proper ModDetails computed via initModDetails (needed for type lookups)
    - emptyHomeModInfoLinkable (no linkable yet)
 
@@ -2121,14 +2120,15 @@ Implementation:
      * IsBackpackModule: Backpack units need InstantiationNode to complete first
 
 Benefits:
-- Module A can start typechecking while B is still doing codegen
-- With many modules, this creates a pipeline effect where typecheck and codegen
-  of different modules run in parallel
-- Cross-module inlining works correctly (unfoldings are in the partial interface)
-- A's codegen gets B's full CAF/LFInfo for optimal code generation
+- Module A can typecheck AND desugar while B is still doing codegen
+- With many modules, this creates a pipeline effect where typecheck/desugar and
+  codegen of different modules run in parallel
+- Cross-module inlining works correctly (unfoldings are in the early interface)
+- Full interfaces get proper CAF/LFInfo once codegen completes
 
 9. Performance:
    - Two-phase signaling is enabled for all builds to ensure thorough testing
+   - Computing fingerprints twice (early + full) has negligible cost compared to codegen
    - The overhead of MVars is minimal compared to compilation time
 -}
 
