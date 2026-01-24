@@ -73,7 +73,6 @@ import GHC.Utils.Outputable
 import GHC.Utils.Panic
 import GHC.Utils.Logger
 import GHC.Utils.Binary
-import GHC.Utils.Fingerprint ( fingerprint0 )
 import GHC.Iface.Binary
 
 import GHC.Data.FastString
@@ -161,27 +160,18 @@ mkFullIface hsc_env partial_iface mb_stg_infos mb_cmm_infos stubs foreign_files 
 
 -- | Create an early interface for two-phase compilation.
 --
--- This is a lightweight version of 'mkFullIface' that skips expensive
--- fingerprinting and sharing operations. The resulting interface is suitable
--- for dependent modules to typecheck against, but should NOT be written to disk.
+-- This computes real fingerprints for the interface, which allows dependent
+-- modules to desugar (not just typecheck) against the early interface.
+-- The fingerprints only depend on declaration structure (types, classes, etc.),
+-- not on codegen info (CAF/LF info), so they can be computed early.
 --
--- The early interface has dummy fingerprints since:
--- 1. It's never written to disk
--- 2. It's only used temporarily for typechecking dependents
--- 3. It will be replaced by a proper interface from 'mkFullIface' after codegen
+-- The resulting interface is suitable for dependent modules to typecheck
+-- and desugar against, but should NOT be written to disk since it lacks
+-- codegen info (CAF/LF info, tag signatures).
 --
 -- See Note [Two-phase interface generation] in GHC.Driver.Make
-mkEarlyIface :: PartialModIface -> ModIface
-mkEarlyIface partial_iface =
-    -- Get declarations with dummy fingerprints
-    let decls_with_fingerprints = [(fingerprint0, d) | d <- mi_decls partial_iface]
-    in completePartialModIface
-         partial_iface
-         fingerprint0           -- dummy iface_hash
-         decls_with_fingerprints
-         (mi_simplified_core partial_iface)
-         emptyIfaceBackend      -- dummy ABI hashes
-         emptyModIfaceCache     -- empty cache (will be rebuilt by initModDetails)
+mkEarlyIface :: HscEnv -> PartialModIface -> IO ModIface
+mkEarlyIface = addFingerprints
 
 -- | Compress an 'ModIface' and share as many values as possible, depending on the 'CompressionIFace' level.
 -- See Note [Sharing of ModIface].
