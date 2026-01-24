@@ -12,6 +12,7 @@
 module GHC.Iface.Make
    ( mkPartialIface
    , mkFullIface
+   , mkEarlyIface
    , mkIfaceTc
    , mkRecompUsageInfo
    , mkIfaceExports
@@ -72,6 +73,7 @@ import GHC.Utils.Outputable
 import GHC.Utils.Panic
 import GHC.Utils.Logger
 import GHC.Utils.Binary
+import GHC.Utils.Fingerprint ( fingerprint0 )
 import GHC.Iface.Binary
 
 import GHC.Data.FastString
@@ -156,6 +158,30 @@ mkFullIface hsc_env partial_iface mb_stg_infos mb_cmm_infos stubs foreign_files 
       (pprModIface unit_state full_iface)
     final_iface <- shareIface (hsc_NC hsc_env) (flagsToIfCompression $ hsc_dflags hsc_env) full_iface
     return final_iface
+
+-- | Create an early interface for two-phase compilation.
+--
+-- This is a lightweight version of 'mkFullIface' that skips expensive
+-- fingerprinting and sharing operations. The resulting interface is suitable
+-- for dependent modules to typecheck against, but should NOT be written to disk.
+--
+-- The early interface has dummy fingerprints since:
+-- 1. It's never written to disk
+-- 2. It's only used temporarily for typechecking dependents
+-- 3. It will be replaced by a proper interface from 'mkFullIface' after codegen
+--
+-- See Note [Two-phase interface generation] in GHC.Driver.Make
+mkEarlyIface :: PartialModIface -> ModIface
+mkEarlyIface partial_iface =
+    -- Get declarations with dummy fingerprints
+    let decls_with_fingerprints = [(fingerprint0, d) | d <- mi_decls partial_iface]
+    in completePartialModIface
+         partial_iface
+         fingerprint0           -- dummy iface_hash
+         decls_with_fingerprints
+         (mi_simplified_core partial_iface)
+         emptyIfaceBackend      -- dummy ABI hashes
+         emptyModIfaceCache     -- empty cache (will be rebuilt by initModDetails)
 
 -- | Compress an 'ModIface' and share as many values as possible, depending on the 'CompressionIFace' level.
 -- See Note [Sharing of ModIface].
