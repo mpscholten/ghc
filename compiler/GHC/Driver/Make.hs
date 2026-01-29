@@ -963,9 +963,12 @@ waitResult (ResultVar f var) = MaybeT (fmap f <$> readMVar var)
 data BuildResult = BuildResult { _resultOrigin :: ResultOrigin
                                , resultVar    :: ResultVar (Maybe HomeModInfo)
                                -- ^ Full result, signaled after complete compilation
-                               , partialIfaceVar :: Maybe (MVar (Maybe ModIface))
-                               -- ^ Partial interface, signaled after typechecking (before codegen)
-                               -- Nothing for non-module nodes (InstantiationNode, LinkNode, etc.)
+                               , partialIfaceVar :: Maybe (MVar (Maybe ()))
+                               -- ^ Signal-only: Just () means partial interface is ready
+                               -- (the actual interface is in the HUG, not retained here).
+                               -- Nothing means failed before signaling.
+                               -- Outer Maybe is Nothing for non-module nodes.
+                               -- See Note [Two-phase interface generation]
                                }
 
 -- The origin of this result var, useful for debugging
@@ -973,7 +976,7 @@ data ResultOrigin = NoLoop | Loop ResultLoopOrigin deriving (Show)
 
 data ResultLoopOrigin = Initialise | Rehydrated | Finalised deriving (Show)
 
-mkBuildResult :: ResultOrigin -> ResultVar (Maybe HomeModInfo) -> Maybe (MVar (Maybe ModIface)) -> BuildResult
+mkBuildResult :: ResultOrigin -> ResultVar (Maybe HomeModInfo) -> Maybe (MVar (Maybe ())) -> BuildResult
 mkBuildResult = BuildResult
 
 data BuildLoopState = BuildLoopState { buildDep :: M.Map NodeKey BuildResult
@@ -1112,9 +1115,11 @@ interpretBuildPlan hug mhmi_cache old_hpt plan two_phase = do
                         -- with TypeEnv for lookups.
                         -- This will be replaced by the full HomeModInfo after codegen completes.
                         HUG.addHomeModInfoToHug partial_hmi hug
-                        -- Signal that partial interface is ready AFTER updating HUG.
-                        -- This ensures the module is in HUG when dependents start running.
-                        putMVar var (Just (hm_iface partial_hmi))
+                        -- Signal success (Just ()) AFTER updating HUG.
+                        -- The actual ModIface is NOT retained here to avoid a space leak;
+                        -- dependents get it from the HUG.
+                        -- See Note [Two-phase interface generation]
+                        putMVar var (Just ())
                       Nothing -> Nothing
                 -- Check if this module needs full deps (not just partial interfaces)
                 let home_mod_names = mapMaybe nodeKeyModName (M.keys build_map)
@@ -1971,54 +1976,11 @@ needsFullDeps hsc_env mni rehydrate_mods home_mod_names
 -- - An async exception is thrown
 -- If early_signal_callback already ran, tryPutMVar is a no-op (MVar already full).
 -- See Note [Two-phase interface generation]
-withPartialIfaceGuard :: Maybe (MVar (Maybe ModIface))
+withPartialIfaceGuard :: Maybe (MVar (Maybe ()))
                       -> RunMakeM a
                       -> RunMakeM a
 withPartialIfaceGuard mvar action =
     action `MC.finally` (liftIO $ forM_ mvar $ \v -> void $ tryPutMVar v Nothing)
-
--- | Wait mode determines what to wait for from each dependency.
--- See Note [Two-phase interface generation]
-data WaitMode
-    = WaitFullResult      -- ^ Wait for complete HomeModInfo (traditional)
-    | WaitPartialIface    -- ^ Wait for partial interface (two-phase)
-
--- | Wait for dependencies according to the specified mode.
--- Returns the interfaces, filtering out failed/non-module deps.
--- See Note [Two-phase interface generation]
-waitDependencies :: WaitMode -> [BuildResult] -> RunMakeM [ModIface]
-waitDependencies _mode [] = return []
-waitDependencies mode (br:brs) = do
-    miface <- waitOne mode br
-    ifaces <- waitDependencies mode brs
-    return $ maybe ifaces (:ifaces) miface
-  where
-    -- Wait for one dependency according to the mode
-    waitOne :: WaitMode -> BuildResult -> RunMakeM (Maybe ModIface)
-    waitOne WaitFullResult br' = do
-        mhmi <- lift $ waitResult (resultVar br')
-        return $ hm_iface <$> mhmi
-
-    waitOne WaitPartialIface br' = case partialIfaceVar br' of
-        Just var -> do
-            -- Wait for partial interface to be ready
-            miface <- liftIO $ readMVar var
-            case miface of
-                Just iface -> return $ Just iface
-                Nothing -> do
-                    -- Partial interface is Nothing, meaning the dependency failed.
-                    -- The withPartialIfaceGuard fills the MVar with Nothing when
-                    -- compilation fails before early_signal_callback runs.
-                    -- We must fail via MaybeT to propagate the failure.
-                    -- We do this by waiting on resultVar, which will fail via MaybeT
-                    -- since the module failed.
-                    _ <- lift $ waitResult (resultVar br')
-                    -- If we somehow get here (shouldn't happen), return Nothing
-                    return Nothing
-        Nothing ->
-            -- No partial interface available (e.g., module in a loop, or non-module node).
-            -- Fall back to waiting on the full result.
-            waitOne WaitFullResult br'
 
 -- | Wait for dependencies to finish, and then return their results.
 -- This is the traditional mode that waits for complete HomeModInfo.
@@ -2031,9 +1993,27 @@ wait_deps (x:xs) = do
 
 -- | Wait for partial interfaces of dependencies to be ready.
 -- This allows dependent modules to start typechecking earlier.
+-- Only waits for the signal; does not retain the ModIface.
 -- See Note [Two-phase interface generation]
-wait_partial_ifaces :: [BuildResult] -> RunMakeM [ModIface]
-wait_partial_ifaces = waitDependencies WaitPartialIface
+wait_partial_ifaces :: [BuildResult] -> RunMakeM ()
+wait_partial_ifaces [] = return ()
+wait_partial_ifaces (br:brs) = do
+    case partialIfaceVar br of
+        Just var -> do
+            -- Wait for the signal
+            result <- liftIO $ readMVar var
+            case result of
+                Just () -> return ()
+                Nothing -> do
+                    -- Dependency failed before signaling. Propagate failure
+                    -- by waiting on resultVar which will fail via MaybeT.
+                    _ <- lift $ waitResult (resultVar br)
+                    return ()
+        Nothing ->
+            -- No partial interface var (e.g., module in a loop, or non-module node).
+            -- Fall back to waiting on the full result.
+            void $ lift $ waitResult (resultVar br)
+    wait_partial_ifaces brs
 
 {- Note [Two-phase interface generation]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -2074,8 +2054,11 @@ real fingerprints for early interfaces, enabling the full parallelism benefit.
 Implementation:
 
 1. BuildResult has two signals:
-   - partialIfaceVar :: Maybe (MVar (Maybe ModIface)) -- after typecheck
-   - resultVar :: ResultVar (Maybe HomeModInfo)       -- after full compilation
+   - partialIfaceVar :: Maybe (MVar (Maybe ())) -- signal-only, after typecheck
+   - resultVar :: ResultVar (Maybe HomeModInfo)  -- after full compilation
+   The partialIfaceVar is signal-only (Just () for success, Nothing for failure)
+   to avoid retaining the early ModIface for the entire build. The actual interface
+   is placed in the HUG by early_signal_callback and looked up from there.
 
 2. In hscPipelineWithEarlySignal (GHC.Driver.Pipeline):
    - After T_HscPostTc completes, we have the partial interface (includes unfoldings)
@@ -2105,12 +2088,11 @@ Implementation:
    - The full HomeModInfo replaces the partial one in HUG
    - The resultVar is filled with the complete result
 
-7. Wait mode abstraction:
-   - WaitMode determines what to wait for from each dependency:
-     * WaitFullResult: Wait for complete HomeModInfo (traditional mode)
-     * WaitPartialIface: Wait for partial interface only (two-phase mode)
-   - waitDependencies is the unified function that handles both modes
-   - wait_partial_ifaces and wait_deps are simple wrappers for convenience
+7. Waiting:
+   - wait_partial_ifaces waits for the signal-only MVar (Just () or Nothing)
+   - wait_deps waits for the full HomeModInfo result
+   - On failure (Nothing signal), wait_partial_ifaces falls back to waitResult
+     to propagate the error via MaybeT
 
 8. needsFullDeps and FullDepsReason:
    - Some modules cannot use two-phase waiting and must wait for full results:
@@ -2128,7 +2110,9 @@ Benefits:
 
 9. Performance:
    - Two-phase signaling is enabled for all builds to ensure thorough testing
-   - Computing fingerprints twice (early + full) has negligible cost compared to codegen
+   - The partialIfaceVar is signal-only to avoid retaining early ModIface objects
+   - The early ModIface is threaded through HscBackendAction (hscs_early_iface)
+     so the backend can reuse it instead of calling addFingerprints again
    - The overhead of MVars is minimal compared to compilation time
 -}
 
