@@ -964,10 +964,18 @@ data BuildResult = BuildResult { _resultOrigin :: ResultOrigin
                                , resultVar    :: ResultVar (Maybe HomeModInfo)
                                -- ^ Full result, signaled after complete compilation
                                , partialIfaceVar :: Maybe (MVar (Maybe ()))
-                               -- ^ Signal-only: Just () means partial interface is ready
-                               -- (the actual interface is in the HUG, not retained here).
-                               -- Nothing means failed before signaling.
+                               -- ^ Signal-only MVar for two-phase compilation.
+                               -- Just () = partial interface is ready (in the HUG).
+                               -- Nothing = module failed before signaling.
                                -- Outer Maybe is Nothing for non-module nodes.
+                               --
+                               -- Important: this intentionally does NOT hold the ModIface.
+                               -- BuildLoopState.buildDep retains all BuildResults for the
+                               -- entire upsweep, so storing the ModIface here would keep
+                               -- every module's early interface alive (~22 MB each) until
+                               -- the build completes. Instead, the early ModIface is placed
+                               -- into the HUG by early_signal_callback, and dependents look
+                               -- it up from there.
                                -- See Note [Two-phase interface generation]
                                }
 
@@ -1115,10 +1123,12 @@ interpretBuildPlan hug mhmi_cache old_hpt plan two_phase = do
                         -- with TypeEnv for lookups.
                         -- This will be replaced by the full HomeModInfo after codegen completes.
                         HUG.addHomeModInfoToHug partial_hmi hug
-                        -- Signal success (Just ()) AFTER updating HUG.
-                        -- The actual ModIface is NOT retained here to avoid a space leak;
-                        -- dependents get it from the HUG.
-                        -- See Note [Two-phase interface generation]
+                        -- Signal success AFTER updating HUG.
+                        -- We signal with Just () rather than the ModIface itself
+                        -- because buildDep retains all BuildResults for the entire
+                        -- upsweep. Storing the ModIface in the MVar would keep every
+                        -- module's early interface (~22 MB each) pinned in memory
+                        -- until the build completes, causing a significant space leak.
                         putMVar var (Just ())
                       Nothing -> Nothing
                 -- Check if this module needs full deps (not just partial interfaces)

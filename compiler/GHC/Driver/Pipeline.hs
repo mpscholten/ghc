@@ -94,7 +94,7 @@ import GHC.Data.StringBuffer   ( hPutStringBuffer )
 import GHC.Data.Maybe          ( expectJust )
 import qualified System.OsPath as SysOsPath
 
-import GHC.Iface.Make          ( mkFullIface, mkEarlyIface )
+import GHC.Iface.Make          ( mkFullIface, mkFullIfaceFromEarly, mkEarlyIface )
 import GHC.Iface.Load          ( getGhcPrimIface )
 import GHC.Runtime.Loader      ( initializePlugins )
 
@@ -918,14 +918,16 @@ hscPipelineWithEarlySignal pipe_env (hsc_env_with_plugins, mod_sum, hsc_recomp_s
     HscRecompNeeded mb_old_hash -> do
       (tc_result, warnings) <- use (T_Hsc hsc_env_with_plugins mod_sum)
 
-      hscBackendAction <- use (T_HscPostTc hsc_env_with_plugins mod_sum tc_result warnings mb_old_hash)
+      hscBackendAction0 <- use (T_HscPostTc hsc_env_with_plugins mod_sum tc_result warnings mb_old_hash)
       -- Signal partial interface is ready (before codegen)
       -- Create an "early" HomeModInfo with proper ModDetails for dependents to use
       -- We return the early details so caller can reuse them instead of calling
       -- initModDetails again. The types don't change between typecheck and codegen.
-      mb_early_details <- case mb_early_signal of
+      -- Also thread the early iface into HscBackendAction so the backend can
+      -- skip addFingerprints and just patch in codegen info.
+      (mb_early_details, hscBackendAction) <- case mb_early_signal of
         Just signal -> liftIO $ do
-          case hscBackendAction of
+          case hscBackendAction0 of
             HscRecomp { hscs_partial_iface = partial_iface } -> do
               -- Create early interface without codegen info (no CAF/LF info)
               -- but with real fingerprints so dependents can desugar
@@ -933,12 +935,15 @@ hscPipelineWithEarlySignal pipe_env (hsc_env_with_plugins, mod_sum, hsc_recomp_s
               -- Compute ModDetails so dependents can look up types
               early_details <- initModDetails hsc_env_with_plugins early_iface
               signal (HomeModInfo early_iface early_details emptyHomeModInfoLinkable)
-              return (Just early_details)
+              -- Thread early iface into HscBackendAction so the backend can
+              -- reuse fingerprints instead of calling addFingerprints again
+              let !action' = hscBackendAction0 { hscs_early_iface = Just early_iface }
+              return (Just early_details, action')
             HscUpdate iface -> do
               details <- initModDetails hsc_env_with_plugins iface
               signal (HomeModInfo iface details emptyHomeModInfoLinkable)
-              return (Just details)
-        Nothing -> return Nothing
+              return (Just details, hscBackendAction0)
+        Nothing -> return (Nothing, hscBackendAction0)
       (iface, linkables) <- hscBackendPipeline pipe_env hsc_env_with_plugins mod_sum hscBackendAction
       return (iface, linkables, mb_early_details)
 
@@ -962,7 +967,12 @@ hscBackendPipeline pipe_env hsc_env mod_sum result =
   else
     case result of
       HscUpdate iface ->  return (iface, emptyRecompLinkables)
-      HscRecomp {} -> (,) <$> liftIO (mkFullIface hsc_env (hscs_partial_iface result) Nothing Nothing NoStubs []) <*> pure emptyRecompLinkables
+      HscRecomp {} -> do
+        final_iface <- case hscs_early_iface result of
+          -- Reuse early iface: no codegen info to add, skip addFingerprints
+          Just ei -> liftIO $ mkFullIfaceFromEarly hsc_env ei (hscs_partial_iface result) Nothing Nothing NoStubs []
+          Nothing -> liftIO $ mkFullIface hsc_env (hscs_partial_iface result) Nothing Nothing NoStubs []
+        return (final_iface, emptyRecompLinkables)
 
 hscGenBackendPipeline :: P m
   => PipeEnv
