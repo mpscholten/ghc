@@ -2568,6 +2568,7 @@ fFlagsDeps = [
   flagSpec "block-layout-weightless"          Opt_WeightlessBlocklayout,
   flagSpec "omit-interface-pragmas"           Opt_OmitInterfacePragmas,
   flagSpec "omit-yields"                      Opt_OmitYields,
+  flagSpec "parallel-codegen"                 Opt_ParallelCodegen,
   flagSpec "optimal-applicative-do"           Opt_OptimalApplicativeDo,
   flagSpec "pedantic-bottoms"                 Opt_PedanticBottoms,
   flagSpec "pre-inlining"                     Opt_SimplPreInlining,
@@ -2621,6 +2622,7 @@ fFlagsDeps = [
   flagSpec "unbox-strict-fields"              Opt_UnboxStrictFields,
   flagSpec "unoptimized-core-for-interpreter" Opt_UnoptimizedCoreForInterpreter,
   flagSpec "version-macros"                   Opt_VersionMacros,
+  flagSpec "work-queue"                       Opt_WorkQueue,
   flagSpec "worker-wrapper"                   Opt_WorkerWrapper,
   flagSpec "worker-wrapper-cbv"               Opt_WorkerWrapperUnlift, -- See Note [Worker/wrapper for strict arguments]
   flagSpec "solve-constant-dicts"             Opt_SolveConstantDicts,

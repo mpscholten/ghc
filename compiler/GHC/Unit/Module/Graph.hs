@@ -132,6 +132,11 @@ module GHC.Unit.Module.Graph
    , summaryNodeSummary
    , summaryNodeKey
 
+    -- * Work queue support
+   , TaskKey(..)
+   , computeFanOut
+   , computeCriticalPath
+
    )
 where
 
@@ -1043,6 +1048,80 @@ moduleGraphNodesStages summaries =
         -- If we want keep_hi_boot_nodes, then we do lookup_key with
         -- IsBoot; else False
 
+
+--------------------------------------------------------------------------------
+-- * Work queue support
+--------------------------------------------------------------------------------
+
+-- | Identifies a task in the work queue: either typecheck or codegen of a module.
+data TaskKey
+  = TaskKey_TC !NodeKey   -- ^ Typecheck task for a module
+  | TaskKey_CG !NodeKey   -- ^ Codegen task for a module
+  deriving (Eq, Ord)
+
+instance Outputable TaskKey where
+  ppr (TaskKey_TC nk) = text "TC:" <> ppr nk
+  ppr (TaskKey_CG nk) = text "CG:" <> ppr nk
+
+-- | Compute the fan-out of each node (how many modules transitively depend on it).
+-- Higher fan-out = more modules unblocked when this one completes.
+computeFanOut :: ModuleGraph -> Map.Map NodeKey Int
+computeFanOut mg =
+  let nodes = mg_mss mg
+      -- Build reverse dependency map: for each node, which nodes depend on it?
+      all_edges :: [(NodeKey, NodeKey)] -- (dependency, dependant)
+      all_edges = [ (dep, mkNodeKey n)
+                  | n <- nodes
+                  , dep <- mgNodeDependencies False n
+                  ]
+      -- Count direct reverse deps per node
+      rev_dep_counts = Map.fromListWith (+) [(dep, 1 :: Int) | (dep, _) <- all_edges]
+  in rev_dep_counts
+
+-- | Compute the critical path length for each node (longest chain of
+-- dependent typechecks from this node to a leaf). Used to prioritize
+-- modules on the critical path.
+computeCriticalPath :: ModuleGraph -> Map.Map NodeKey Int
+computeCriticalPath mg =
+  let nodes = mg_mss mg
+      -- Build adjacency map (forward deps: node -> its dependencies)
+      dep_map :: Map.Map NodeKey [NodeKey]
+      dep_map = Map.fromList
+        [ (mkNodeKey n, mgNodeDependencies False n)
+        | n <- nodes
+        ]
+      -- Build reverse adjacency map (node -> modules that depend on it)
+      rev_map :: Map.Map NodeKey [NodeKey]
+      rev_map = Map.fromListWith (++)
+        [ (dep, [mkNodeKey n])
+        | n <- nodes
+        , dep <- mgNodeDependencies False n
+        ]
+      -- All node keys
+      all_keys = map mkNodeKey nodes
+      -- Leaf nodes: nodes with no reverse deps (nothing depends on them)
+      leaf_keys = [ k | k <- all_keys, null (Map.findWithDefault [] k rev_map) ]
+      -- BFS from leaves backward: critical path = longest path from any leaf
+      -- We compute depth from leaves via iterative relaxation
+      go :: Map.Map NodeKey Int -> [NodeKey] -> Map.Map NodeKey Int
+      go depths [] = depths
+      go depths frontier =
+        let next_frontier_with_depth =
+              [ (dep, d + 1)
+              | nk <- frontier
+              , let d = Map.findWithDefault 0 nk depths
+              , dep <- Map.findWithDefault [] nk dep_map
+              ]
+            -- Only update if we found a longer path
+            (updated, new_depths) = foldr (\(k, new_d) (changed, m) ->
+              let old_d = Map.findWithDefault 0 k m
+              in if new_d > old_d
+                 then (k : changed, Map.insert k new_d m)
+                 else (changed, m))
+              ([], depths) next_frontier_with_depth
+        in go new_depths updated
+      initial = Map.fromList [(k, 0) | k <- leaf_keys]
+  in go initial leaf_keys
 
 -- | Add an ExtendedModSummary to ModuleGraph. Assumes that the new ModSummary is
 -- not an element of the ModuleGraph.

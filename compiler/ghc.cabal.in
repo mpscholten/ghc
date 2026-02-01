@@ -529,6 +529,7 @@ Library
         GHC.Driver.Messager
         GHC.Driver.MakeAction
         GHC.Driver.MakeFile
+        GHC.Driver.WorkQueue
         GHC.Driver.Monad
         GHC.Driver.Phases
         GHC.Driver.Pipeline

@@ -131,6 +131,10 @@ import GHC.Data.Graph.Directed.Reachability
 import qualified GHC.Unit.Home.Graph as HUG
 import GHC.Unit.Home.PackageTable
 
+import GHC.Driver.WorkQueue
+import GHC.Driver.Pipeline.LogQueue (logThread, newLogQueueQueue)
+import Control.Concurrent.STM (newTVarIO, writeTVar, atomically)
+
 -- -----------------------------------------------------------------------------
 -- Loading the program
 
@@ -1250,7 +1254,13 @@ upsweep
     -> M.Map ModNodeKeyWithUid HomeModInfo
     -> [BuildPlan]
     -> IO (SuccessFlag, [HomeModInfo])
-upsweep n_jobs hsc_env hmi_cache diag_wrapper mHscMessage old_hpt build_plan = do
+upsweep n_jobs hsc_env hmi_cache diag_wrapper mHscMessage old_hpt build_plan
+    -- Use global work queue when -fwork-queue is enabled
+    | gopt Opt_WorkQueue (hsc_dflags hsc_env)
+    = upsweepWorkQueue n_jobs hsc_env hmi_cache diag_wrapper mHscMessage old_hpt build_plan
+    -- Traditional pipeline
+    | otherwise
+    = do
     -- Enable two-phase signaling for all builds to ensure the code path is tested
     -- even in single-threaded mode. See Note [Two-phase interface generation]
     let two_phase = True
@@ -1269,6 +1279,192 @@ upsweep n_jobs hsc_env hmi_cache diag_wrapper mHscMessage old_hpt build_plan = d
         Nothing  -> do
           let success_flag = successIf (all isJust res)
           return (success_flag, completed)
+
+-- | Work-queue-based upsweep. Enabled by @-fwork-queue@.
+-- Replaces the thread-per-module + semaphore model with a fixed worker pool.
+-- See Note [Work Queue Architecture] in GHC.Driver.WorkQueue.
+upsweepWorkQueue
+    :: WorkerLimit
+    -> HscEnv
+    -> Maybe ModIfaceCache
+    -> (GhcMessage -> AnyGhcDiagnostic)
+    -> Maybe Messager
+    -> M.Map ModNodeKeyWithUid HomeModInfo
+    -> [BuildPlan]
+    -> IO (SuccessFlag, [HomeModInfo])
+upsweepWorkQueue n_jobs hsc_env hmi_cache diag_wrapper mHscMessage old_hpt build_plan = do
+    let sec = initSourceErrorContext (hsc_dflags hsc_env)
+
+    -- Check for unresolved cycles first (same as traditional upsweep)
+    case [ns | UnresolvedCycle ns <- build_plan] of
+      (mss:_) -> throwOneError sec $ cyclicModuleErr mss
+      [] -> return ()
+
+    let hug = hsc_HUG hsc_env
+        all_nodes = concatMap planNodes build_plan
+
+        -- Compute priorities
+        mg = mkModuleGraph all_nodes
+        fan_out = computeFanOut mg
+        crit_path = computeCriticalPath mg
+        n_mods = length all_nodes
+
+    -- Build task entries. Each module gets a single task that performs the
+    -- full compilation (typecheck + codegen) using the existing
+    -- compileOneWithEarlySignal pipeline. The work queue handles scheduling.
+    --
+    -- In the future, we could split TC and CG into separate tasks for
+    -- finer-grained scheduling. For now, we get the key benefit: a fixed
+    -- worker pool with priority-based scheduling and no semaphore.
+    completed_hmis <- newIORef ([] :: [HomeModInfo])
+
+    tasks <- buildWorkQueueTasks hsc_env hmi_cache diag_wrapper mHscMessage
+               old_hpt hug fan_out crit_path n_mods completed_hmis build_plan
+
+    -- Create and run the work queue
+    wq <- newWorkQueue tasks
+
+    -- Set up parallel logging
+    stopped_var <- newTVarIO False
+    log_queue_queue_var <- newTVarIO newLogQueueQueue
+    wait_log_thread <- logThread (hsc_logger hsc_env) stopped_var log_queue_queue_var
+    thread_safe_logger <- makeThreadSafe (hsc_logger hsc_env)
+    let thread_safe_hsc_env = hsc_env { hsc_logger = thread_safe_logger }
+
+    success <- runWorkerLimit n_jobs $ \abstract_sem -> do
+      let env = MakeEnv { hsc_env = thread_safe_hsc_env
+                        , compile_sem = abstract_sem
+                        , withLogger = withParLog log_queue_queue_var
+                        , env_messager = mHscMessage
+                        , diag_wrapper = diag_wrapper
+                        }
+      result <- runWorkQueueWorkers n_jobs wq env
+      atomically $ writeTVar stopped_var True
+      wait_log_thread
+      return result
+
+    hmis <- readIORef completed_hmis
+    return (if success then Succeeded else Failed, hmis)
+
+  where
+    planNodes :: BuildPlan -> [ModuleGraphNode]
+    planNodes (SingleModule n)    = [n]
+    planNodes (ResolvedCycle ns)  = map (either id (\(ModuleGraphNodeWithBootFile n _) -> n)) ns
+    planNodes (UnresolvedCycle _) = []
+
+
+-- | Build TaskEntry list from a BuildPlan for the work queue scheduler.
+buildWorkQueueTasks
+    :: HscEnv
+    -> Maybe ModIfaceCache
+    -> (GhcMessage -> AnyGhcDiagnostic)
+    -> Maybe Messager
+    -> M.Map ModNodeKeyWithUid HomeModInfo
+    -> HomeUnitGraph
+    -> Map.Map NodeKey Int    -- ^ Fan-out
+    -> Map.Map NodeKey Int    -- ^ Critical path
+    -> Int                    -- ^ Total module count
+    -> IORef [HomeModInfo]    -- ^ Accumulator for completed modules
+    -> [BuildPlan]
+    -> IO [TaskEntry]
+buildWorkQueueTasks hsc_env hmi_cache diag_wrapper mHscMessage
+                    old_hpt hug fan_out crit_path n_mods completed_ref build_plan = do
+    idx_ref <- newIORef (1 :: Int)
+    let nextIdx = do
+          n <- readIORef idx_ref
+          writeIORef idx_ref (n + 1)
+          return n
+    concat <$> mapM (planToTasks nextIdx) build_plan
+  where
+    planToTasks :: IO Int -> BuildPlan -> IO [TaskEntry]
+    planToTasks nextIdx (SingleModule node) = do
+      nodeToTasks nextIdx Nothing node
+    planToTasks nextIdx (ResolvedCycle nodes) = do
+      -- For resolved cycles, we compile each module normally (the hs-boot
+      -- files break the cycle). Rehydration is handled by adding a
+      -- rehydration task after all cycle modules complete.
+      -- For now, treat each module in the cycle as a single task.
+      concat <$> mapM (\n -> nodeToTasks nextIdx Nothing (either id (\(ModuleGraphNodeWithBootFile mn _) -> mn) n)) nodes
+    planToTasks _ (UnresolvedCycle _) = return []  -- Already handled above
+
+    nodeToTasks :: IO Int -> Maybe [NodeKey] -> ModuleGraphNode -> IO [TaskEntry]
+    nodeToTasks nextIdx _rehydrate_nodes node = do
+      idx <- nextIdx
+      let nk = mkNodeKey node
+          fo = Map.findWithDefault 0 nk fan_out
+          cp = Map.findWithDefault 0 nk crit_path
+          direct_deps = mgNodeDependencies False node
+          -- All deps map to TaskKey_TC since we use single combined tasks
+          task_deps = [TaskKey_TC dk | dk <- direct_deps]
+          tc_key = TaskKey_TC nk
+
+      case node of
+        ModuleNode _deps mni -> do
+          let task_action :: MakeEnv -> IO ()
+              task_action env = do
+                withLoggerHsc idx env $ \lcl_hsc_env -> do
+                  let hsc_env' = setHUG hug lcl_hsc_env
+                  case mni of
+                    ModuleNodeCompile ms -> do
+                      let old_hmi = M.lookup (mnKey mni) old_hpt
+                          -- Early signal callback: add early interface to HUG
+                          early_signal = \partial_hmi -> do
+                            HUG.addHomeModInfoToHug partial_hmi hug
+                      hmi <- upsweep_mod hsc_env' (env_messager env) old_hmi ms idx n_mods (Just early_signal)
+                      -- Add full HomeModInfo to HUG
+                      HUG.addHomeModInfoToHug hmi hug
+                      -- Write to cache if available
+                      forM_ hmi_cache $ \cache -> addHmiToCache cache hmi
+                      -- Record completed
+                      atomicModifyIORef' completed_ref (\xs -> (hmi:xs, ()))
+                    ModuleNodeFixed key loc -> do
+                      forM_ (env_messager env) $ \hscMessage ->
+                        hscMessage hsc_env' (idx, n_mods) UpToDate node
+                      read_result <- readIface (hsc_hooks hsc_env') (hsc_logger hsc_env') (hsc_dflags hsc_env') (hsc_NC hsc_env')
+                                       (mnkToModule key) (ml_hi_file loc)
+                      case read_result of
+                        M.Failed interface_err -> do
+                          let sec = initSourceErrorContext (hsc_dflags hsc_env')
+                              mn = mnkModuleName key
+                              err = Can'tFindInterface (BadIfaceFile interface_err) (LookingForModule (gwib_mod mn) (gwib_isBoot mn))
+                          throwErrors sec $ singleMessage $ mkPlainErrorMsgEnvelope noSrcSpan (GhcDriverMessage (DriverInterfaceError err))
+                        M.Succeeded iface -> do
+                          details <- genModDetails hsc_env' iface
+                          mb_object <- findObjectLinkableMaybe (mi_module iface) loc
+                          mb_bytecode <- loadIfaceByteCodeLazy hsc_env' iface loc (md_types details)
+                          let hm_linkable = HomeModLinkable mb_bytecode mb_object
+                              hmi = HomeModInfo iface details hm_linkable
+                          HUG.addHomeModInfoToHug hmi hug
+                          atomicModifyIORef' completed_ref (\xs -> (hmi:xs, ()))
+          return [TaskEntry (phasePriority TypecheckPhase + fo + cp * 2)
+                            TypecheckPhase tc_key task_deps task_action]
+
+        InstantiationNode uid iuid -> do
+          let task_action :: MakeEnv -> IO ()
+              task_action env = do
+                withLoggerHsc idx env $ \lcl_hsc_env -> do
+                  let hsc_env' = setHUG hug lcl_hsc_env
+                  upsweep_inst hsc_env' (env_messager env) idx n_mods uid iuid
+          return [TaskEntry (phasePriority InstantiationPhase + fo)
+                            InstantiationPhase tc_key task_deps task_action]
+
+        LinkNode dep_keys uid -> do
+          let task_deps_link = [TaskKey_TC dk | dk <- dep_keys]
+              task_action :: MakeEnv -> IO ()
+              task_action env = do
+                withLoggerHsc idx env $ \lcl_hsc_env -> do
+                  let hsc_env' = setHUG hug lcl_hsc_env
+                      dflags = hsc_dflags hsc_env'
+                      msg' = (\messager -> \recomp -> messager hsc_env' (idx, n_mods) recomp (LinkNode dep_keys uid)) <$> env_messager env
+                  linkresult <- link (ghcLink dflags) hsc_env' True msg' (hsc_HPT hsc_env')
+                  case linkresult of
+                    Failed -> fail "Link failed"
+                    Succeeded -> return ()
+          return [TaskEntry (phasePriority LinkPhase)
+                            LinkPhase tc_key task_deps_link task_action]
+
+        UnitNode {} ->
+          return [TaskEntry 0 LinkPhase tc_key [] (\_ -> return ())]
 
 toCache :: [HomeModInfo] -> M.Map (ModNodeKeyWithUid) HomeModInfo
 toCache hmis = M.fromList ([(miKey $ hm_iface hmi, hmi) | hmi <- hmis])

@@ -886,6 +886,10 @@ data GeneralFlag
 
    | Opt_G_NoStateHack
    | Opt_G_NoOptCoercion
+
+   -- Parallel compilation
+   | Opt_WorkQueue              -- ^ Use global work queue for parallel compilation
+   | Opt_ParallelCodegen        -- ^ Enable parallel codegen within modules
    deriving (Eq, Show, Enum)
 
 -- | The set of flags which affect optimisation for the purposes of
