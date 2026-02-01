@@ -1309,20 +1309,17 @@ upsweepWorkQueue n_jobs hsc_env hmi_cache diag_wrapper mHscMessage old_hpt build
         crit_path = computeCriticalPath mg
         n_mods = length all_nodes
 
-    -- Build task entries. Each module gets a single task that performs the
-    -- full compilation (typecheck + codegen) using the existing
-    -- compileOneWithEarlySignal pipeline. The work queue handles scheduling.
-    --
-    -- In the future, we could split TC and CG into separate tasks for
-    -- finer-grained scheduling. For now, we get the key benefit: a fixed
-    -- worker pool with priority-based scheduling and no semaphore.
+    -- Create work queue first (empty) so task actions can close over it
+    -- for early completion signaling. See Note [Early Completion Signaling]
+    -- in GHC.Driver.WorkQueue.
+    wq <- newEmptyWorkQueue
     completed_hmis <- newIORef ([] :: [HomeModInfo])
 
-    tasks <- buildWorkQueueTasks hsc_env hmi_cache diag_wrapper mHscMessage
+    tasks <- buildWorkQueueTasks wq hsc_env hmi_cache diag_wrapper mHscMessage
                old_hpt hug fan_out crit_path n_mods completed_hmis build_plan
 
-    -- Create and run the work queue
-    wq <- newWorkQueue tasks
+    -- Populate the work queue with tasks
+    populateWorkQueue wq tasks
 
     -- Set up parallel logging
     stopped_var <- newTVarIO False
@@ -1355,7 +1352,8 @@ upsweepWorkQueue n_jobs hsc_env hmi_cache diag_wrapper mHscMessage old_hpt build
 
 -- | Build TaskEntry list from a BuildPlan for the work queue scheduler.
 buildWorkQueueTasks
-    :: HscEnv
+    :: WorkQueue
+    -> HscEnv
     -> Maybe ModIfaceCache
     -> (GhcMessage -> AnyGhcDiagnostic)
     -> Maybe Messager
@@ -1367,7 +1365,7 @@ buildWorkQueueTasks
     -> IORef [HomeModInfo]    -- ^ Accumulator for completed modules
     -> [BuildPlan]
     -> IO [TaskEntry]
-buildWorkQueueTasks hsc_env hmi_cache diag_wrapper mHscMessage
+buildWorkQueueTasks wq hsc_env hmi_cache diag_wrapper mHscMessage
                     old_hpt hug fan_out crit_path n_mods completed_ref build_plan = do
     idx_ref <- newIORef (1 :: Int)
     let nextIdx = do
@@ -1408,8 +1406,11 @@ buildWorkQueueTasks hsc_env hmi_cache diag_wrapper mHscMessage
                     ModuleNodeCompile ms -> do
                       let old_hmi = M.lookup (mnKey mni) old_hpt
                           -- Early signal callback: add early interface to HUG
+                          -- AND signal early completion to unblock dependents
+                          -- See Note [Early Completion Signaling] in WorkQueue
                           early_signal = \partial_hmi -> do
                             HUG.addHomeModInfoToHug partial_hmi hug
+                            earlyComplete wq tc_key
                       hmi <- upsweep_mod hsc_env' (env_messager env) old_hmi ms idx n_mods (Just early_signal)
                       -- Add full HomeModInfo to HUG
                       HUG.addHomeModInfoToHug hmi hug

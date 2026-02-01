@@ -19,9 +19,12 @@ module GHC.Driver.WorkQueue
   , phasePriority
     -- * Work queue
   , WorkQueue(..)
-  , newWorkQueue
+  , newEmptyWorkQueue
+  , populateWorkQueue
     -- * Running the work queue
   , runWorkQueueWorkers
+    -- * Early completion signaling
+  , earlyComplete
   ) where
 
 import GHC.Prelude
@@ -59,6 +62,25 @@ The work queue:
 - Typecheck tasks have higher priority than codegen (they unblock dependents)
 - No semaphore needed: worker count IS the parallelism limit
 - No thread-per-module overhead
+
+Note [Early Completion Signaling]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Each module runs typecheck+codegen as a single task action, but dependents only
+need the early interface (produced after typecheck) to start. To avoid waiting
+for codegen to finish, we use "early completion":
+
+1. Each module's task depends on its deps' TaskKey_TC keys
+2. After typecheck completes (early signal fires), the task calls
+   earlyComplete to mark its own TaskKey_TC as satisfied
+3. This immediately promotes dependents to the ready queue
+4. The task continues with codegen, but dependents are already running
+
+This achieves the same parallelism as split TC/CG tasks without requiring
+separate pipeline functions or inter-task communication via MVars.
+
+The wq_in_flight counter tracks tasks that are executing but haven't returned.
+This prevents the done condition from triggering while workers are still doing
+codegen after their keys have been early-completed.
 
 Task priorities:
   TypecheckPhase = 1000 (highest: unblocks dependents)
@@ -106,22 +128,46 @@ data WorkQueue = WorkQueue
   , wq_waiting   :: !(TVar [TaskEntry])             -- ^ Blocked on deps
   , wq_completed :: !(TVar (Set.Set TaskKey))       -- ^ Completed task keys
   , wq_failed    :: !(TVar (Set.Set TaskKey))       -- ^ Failed task keys
+  , wq_in_flight :: !(TVar Int)                     -- ^ Tasks currently executing
   , wq_done      :: !(TVar Bool)                    -- ^ All work complete or aborted
   }
 
--- | Create a new work queue from a list of task entries.
+-- | Create an empty work queue. Use 'populateWorkQueue' to add tasks.
+-- This allows task actions to close over the WorkQueue for early signaling.
+newEmptyWorkQueue :: IO WorkQueue
+newEmptyWorkQueue =
+  WorkQueue
+    <$> newTVarIO []
+    <*> newTVarIO []
+    <*> newTVarIO Set.empty
+    <*> newTVarIO Set.empty
+    <*> newTVarIO 0
+    <*> newTVarIO True  -- done=True until populated
+
+-- | Populate an empty work queue with tasks.
 -- Tasks with no dependencies are placed in the ready queue;
 -- tasks with dependencies go to the waiting queue.
-newWorkQueue :: [TaskEntry] -> IO WorkQueue
-newWorkQueue all_tasks = do
+populateWorkQueue :: WorkQueue -> [TaskEntry] -> IO ()
+populateWorkQueue wq all_tasks = atomically $ do
   let (ready, waiting) = partition (null . te_deps) all_tasks
       sorted_ready = sortBy (\a b -> compare (te_priority b) (te_priority a)) ready
-  WorkQueue
-    <$> newTVarIO sorted_ready
-    <*> newTVarIO waiting
-    <*> newTVarIO Set.empty
-    <*> newTVarIO Set.empty
-    <*> newTVarIO (null all_tasks)
+  writeTVar (wq_ready wq) sorted_ready
+  writeTVar (wq_waiting wq) waiting
+  writeTVar (wq_done wq) (null all_tasks)
+
+------------------------------------------------------------------------
+-- * Early completion signaling
+------------------------------------------------------------------------
+
+-- | Signal that a task key has been satisfied early (before the task action
+-- returns). This is used for two-phase compilation: after typecheck completes,
+-- we mark the TC key as done so dependents can start immediately while codegen
+-- continues in the current worker.
+-- See Note [Early Completion Signaling]
+earlyComplete :: WorkQueue -> TaskKey -> IO ()
+earlyComplete wq key = do
+  atomically $ modifyTVar' (wq_completed wq) (Set.insert key)
+  promoteWaiting wq
 
 ------------------------------------------------------------------------
 -- * Worker loop
@@ -141,6 +187,7 @@ workerLoop wq env = go
               [] -> retry  -- Block until tasks become ready or done signaled
               (t:ts) -> do
                 writeTVar (wq_ready wq) ts
+                modifyTVar' (wq_in_flight wq) (+1)
                 return (Just t)
       case mb_task of
         Nothing -> return ()  -- All done or aborted
@@ -150,7 +197,9 @@ workerLoop wq env = go
           let deps_failed = any (`Set.member` failed_set) (te_deps entry)
           if deps_failed
             then do
-              atomically $ modifyTVar' (wq_failed wq) (Set.insert (te_node_key entry))
+              atomically $ do
+                modifyTVar' (wq_failed wq) (Set.insert (te_node_key entry))
+                modifyTVar' (wq_in_flight wq) (subtract 1)
               promoteWaiting wq
               go
             else do
@@ -158,13 +207,18 @@ workerLoop wq env = go
               result <- MC.try (te_action entry env)
               case result of
                 Left (_ :: MC.SomeException) -> do
-                  atomically $ modifyTVar' (wq_failed wq) (Set.insert (te_node_key entry))
+                  atomically $ do
+                    modifyTVar' (wq_failed wq) (Set.insert (te_node_key entry))
+                    modifyTVar' (wq_in_flight wq) (subtract 1)
                 Right () -> do
-                  atomically $ modifyTVar' (wq_completed wq) (Set.insert (te_node_key entry))
+                  atomically $ do
+                    modifyTVar' (wq_completed wq) (Set.insert (te_node_key entry))
+                    modifyTVar' (wq_in_flight wq) (subtract 1)
               promoteWaiting wq
               go
 
--- | Move tasks from waiting to ready if all their deps are now satisfied (completed or failed).
+-- | Move tasks from waiting to ready if all their deps are now satisfied
+-- (completed or failed). Also checks the done condition.
 promoteWaiting :: WorkQueue -> IO ()
 promoteWaiting wq = atomically $ do
   waiting <- readTVar (wq_waiting wq)
@@ -178,10 +232,11 @@ promoteWaiting wq = atomically $ do
     ready <- readTVar (wq_ready wq)
     let sorted_new = sortBy (\a b -> compare (te_priority b) (te_priority a)) newly_ready
     writeTVar (wq_ready wq) (mergeByPriority ready sorted_new)
-  -- Check if everything is done
+  -- Check if everything is done: no waiting, no ready, no in-flight
   when (null still_waiting) $ do
     r <- readTVar (wq_ready wq)
-    when (null r) $
+    in_flight <- readTVar (wq_in_flight wq)
+    when (null r && in_flight == 0) $
       writeTVar (wq_done wq) True
 
 -- | Merge two descending-priority-sorted lists
