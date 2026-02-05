@@ -94,7 +94,7 @@ import GHC.Data.StringBuffer   ( hPutStringBuffer )
 import GHC.Data.Maybe          ( expectJust )
 import qualified System.OsPath as SysOsPath
 
-import GHC.Iface.Make          ( mkFullIface, mkFrontendIface )
+import GHC.Iface.Make          ( mkFullIface )
 import GHC.Iface.Load          ( getGhcPrimIface )
 import GHC.Runtime.Loader      ( initializePlugins )
 
@@ -928,10 +928,8 @@ hscPipelineWithEarlySignal pipe_env (hsc_env_with_plugins, mod_sum, hsc_recomp_s
         Just signal -> liftIO $ do
           case hscBackendAction0 of
             HscRecomp { hscs_partial_iface = partial_iface } -> do
-              -- Create frontend interface without codegen info (no CAF/LF/tag info)
-              -- but with real fingerprints so dependents can run
-              -- `T_Hsc`/`T_HscPostTc`.
-              frontend_iface <- mkFrontendIface hsc_env_with_plugins partial_iface
+              -- Create the frontend interface at the T_HscPostTc boundary.
+              frontend_iface <- addFingerprints hsc_env_with_plugins partial_iface
               -- Compute ModDetails so dependents can look up types
               frontend_details <- initModDetails hsc_env_with_plugins frontend_iface
               signal (HomeModInfo frontend_iface frontend_details emptyHomeModInfoLinkable)

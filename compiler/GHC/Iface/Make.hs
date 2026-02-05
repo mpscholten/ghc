@@ -12,7 +12,6 @@
 module GHC.Iface.Make
    ( mkPartialIface
    , mkFullIface
-   , mkFrontendIface
    , mkIfaceTc
    , mkRecompUsageInfo
    , mkIfaceExports
@@ -157,23 +156,6 @@ mkFullIface hsc_env partial_iface mb_stg_infos mb_cmm_infos stubs foreign_files 
       (pprModIface unit_state full_iface)
     final_iface <- shareIface (hsc_NC hsc_env) (flagsToIfCompression $ hsc_dflags hsc_env) full_iface
     return final_iface
-
--- | Create a frontend interface for pipelined compilation.
---
--- This computes real fingerprints for the interface, which allows dependent
--- modules to desugar (not just typecheck) against the frontend interface.
--- The fingerprints intentionally exclude codegen-only IdInfo (CAF/LF info,
--- tag signatures), so they can be computed after the frontend completes
--- (typecheck + desugar + tidy). See Note [Codegen info and fingerprints]
--- in GHC.Iface.Recomp.
---
--- The resulting interface is suitable for dependent modules to run
--- `T_Hsc`/`T_HscPostTc` against, but should NOT be written to disk since it lacks
--- codegen info (CAF/LF info, tag signatures).
---
--- See Note [Pipelined compilation] in GHC.Driver.Make
-mkFrontendIface :: HscEnv -> PartialModIface -> IO ModIface
-mkFrontendIface = addFingerprints
 
 -- | Compress an 'ModIface' and share as many values as possible, depending on the 'CompressionIFace' level.
 -- See Note [Sharing of ModIface].

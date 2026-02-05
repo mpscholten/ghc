@@ -2059,24 +2059,17 @@ Pipeline stages:
 What the frontend interface contains:
 - Types, classes, instances, exports
 - Unfoldings (for cross-module optimization)
-- Real fingerprints (computed via addFingerprints)
+- Fingerprints (computed via addFingerprints)
 - Does NOT contain: CAF info, LF info, tag signatures
 
-Key insight: Fingerprints exclude codegen-only IdInfo
+Frontend fingerprints and backend patches
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Interface fingerprints only depend on:
-- Declaration structure (types, classes, instances)
-- Fixities, annotations, rules
-- Dependencies
+We call `addFingerprints` at the frontend/backend boundary so dependents can
+use the frontend interface immediately for `T_Hsc`/`T_HscPostTc`.
 
-They intentionally exclude CAF info, LF info, and tag signatures (see
-Note [Codegen info and fingerprints] in GHC.Iface.Recomp). This means we can
-compute real fingerprints for frontend interfaces, which allows dependent modules
-to run their entire frontend against frontend interfaces. The `mkRecompUsageInfo`
-function uses fingerprints to record what the module depends on.
-
-By calling `addFingerprints` in `mkFrontendIface` (in GHC.Iface.Make), we compute
-real fingerprints for frontend interfaces, enabling the full parallelism benefit.
+Backend codegen later patches extra IdInfo (CAF/LF/tag info) into the final
+interface. The frontend signal path deliberately does not wait for these backend
+patches, because they are only needed for backend codegen, not for frontend work.
 
 Why is pipelining safe?
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -2102,8 +2095,8 @@ Implementation:
 2. In hscPipelineWithEarlySignal (GHC.Driver.Pipeline):
    - At the frontend/backend boundary (after `T_HscPostTc`) we have
      `PartialModIface` (including unfoldings)
-   - We call mkFrontendIface which uses addFingerprints to compute real fingerprints
-   - The frontend interface has real fingerprints but no CAF/LF/tag info
+   - We call `addFingerprints` to construct the frontend interface
+   - The frontend interface has fingerprints but no CAF/LF/tag info
    - The frontend signal callback is invoked with this interface
 
 3. In buildSingleModule (this module):
