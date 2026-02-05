@@ -12,8 +12,8 @@
 module GHC.Iface.Make
    ( mkPartialIface
    , mkFullIface
-   , mkFullIfaceFromEarly
-   , mkEarlyIface
+   , mkFullIfaceFromFrontend
+   , mkFrontendIface
    , mkIfaceTc
    , mkRecompUsageInfo
    , mkIfaceExports
@@ -160,25 +160,25 @@ mkFullIface hsc_env partial_iface mb_stg_infos mb_cmm_infos stubs foreign_files 
     final_iface <- shareIface (hsc_NC hsc_env) (flagsToIfCompression $ hsc_dflags hsc_env) full_iface
     return final_iface
 
--- | Build full interface reusing fingerprints from an early interface.
+-- | Build full interface reusing fingerprints from a frontend interface.
 -- Skips addFingerprints since fingerprints intentionally exclude codegen-only
 -- IdInfo (CAF/LF info, tag signatures). See Note [Codegen info and fingerprints]
 -- in GHC.Iface.Recomp. Only patches in the updated declarations (with codegen
 -- info) and simplified core (with foreign stubs).
 --
--- The early interface has type @ModIface@ (phase = 'ModIfaceFinal') with
+-- The frontend interface has type @ModIface@ (phase = 'ModIfaceFinal') with
 -- @mi_decls :: [(Fingerprint, IfaceDecl)]@. We reuse the fingerprints and
 -- replace the IfaceDecl parts with the codegen-updated versions from
 -- updateDecl. This is safe because codegen-only IdInfo is excluded from ABI
 -- fingerprints.
 --
--- See Note [Two-phase interface generation] in GHC.Driver.Make
-mkFullIfaceFromEarly :: HscEnv -> ModIface -> PartialModIface
-                     -> Maybe StgCgInfos -> Maybe CmmCgInfos
-                     -> ForeignStubs -> [(ForeignSrcLang, FilePath)]
-                     -> IO ModIface
-mkFullIfaceFromEarly hsc_env early_iface partial_iface
-                     mb_stg_infos mb_cmm_infos stubs foreign_files = do
+-- See Note [Pipelined compilation] in GHC.Driver.Make
+mkFullIfaceFromFrontend :: HscEnv -> ModIface -> PartialModIface
+                        -> Maybe StgCgInfos -> Maybe CmmCgInfos
+                        -> ForeignStubs -> [(ForeignSrcLang, FilePath)]
+                        -> IO ModIface
+mkFullIfaceFromFrontend hsc_env frontend_iface partial_iface
+                        mb_stg_infos mb_cmm_infos stubs foreign_files = do
     -- Update declarations with codegen info (CAF/LF/tag info).
     let updated_decls
           | gopt Opt_OmitInterfacePragmas (hsc_dflags hsc_env)
@@ -186,16 +186,16 @@ mkFullIfaceFromEarly hsc_env early_iface partial_iface
           | otherwise
           = updateDecl (mi_decls partial_iface) mb_stg_infos mb_cmm_infos
 
-    -- Build a map from OccName to Fingerprint from the early iface.
-    -- The early iface's fingerprints are still valid because codegen-only
+    -- Build a map from OccName to Fingerprint from the frontend iface.
+    -- The frontend iface's fingerprints are still valid because codegen-only
     -- IdInfo is excluded from fingerprints (see Note [Codegen info and
     -- fingerprints] in GHC.Iface.Recomp). We must match by OccName rather than
     -- by position because addFingerprints sorts declarations by OccName, while
     -- the partial iface has declarations in TypeEnv order (non-deterministic).
     let fp_map = Map.fromList
-          [(getOccName d, fp) | (fp, d) <- mi_decls early_iface]
+          [(getOccName d, fp) | (fp, d) <- mi_decls frontend_iface]
 
-    -- Pair each updated declaration with its fingerprint from the early
+    -- Pair each updated declaration with its fingerprint from the frontend
     -- iface, then sort by OccName to match the canonical order produced
     -- by addFingerprints (see GHC.Iface.Recomp).
     let decls = Map.elems $ Map.fromList
@@ -205,16 +205,16 @@ mkFullIfaceFromEarly hsc_env early_iface partial_iface
           ]
 
     -- See Note [Foreign stubs and TH bytecode linking]
-    -- Use the early iface's mi_simplified_core (which has extra decls sorted
+    -- Use the frontend iface's mi_simplified_core (which has extra decls sorted
     -- by binding_key from addFingerprints) rather than the partial iface's
     -- unsorted version.  We only need to update the foreign stubs.
-    mi_simplified_core <- for (mi_simplified_core early_iface) $ \simpl_core -> do
+    mi_simplified_core <- for (mi_simplified_core frontend_iface) $ \simpl_core -> do
         fs <- encodeIfaceForeign (hsc_logger hsc_env) (hsc_dflags hsc_env) stubs foreign_files
         return $ (simpl_core { mi_sc_foreign = fs })
 
-    -- Patch the early iface with codegen info, reusing its fingerprints
+    -- Patch the frontend iface with codegen info, reusing its fingerprints
     let patched = set_mi_simplified_core mi_simplified_core
-                $ set_mi_decls decls early_iface
+                $ set_mi_decls decls frontend_iface
 
     -- Debug printing
     let unit_state = hsc_units hsc_env
@@ -223,21 +223,22 @@ mkFullIfaceFromEarly hsc_env early_iface partial_iface
     final_iface <- shareIface (hsc_NC hsc_env) (flagsToIfCompression $ hsc_dflags hsc_env) patched
     return final_iface
 
--- | Create an early interface for two-phase compilation.
+-- | Create a frontend interface for pipelined compilation.
 --
 -- This computes real fingerprints for the interface, which allows dependent
--- modules to desugar (not just typecheck) against the early interface.
+-- modules to desugar (not just typecheck) against the frontend interface.
 -- The fingerprints intentionally exclude codegen-only IdInfo (CAF/LF info,
--- tag signatures), so they can be computed early. See Note [Codegen info and
--- fingerprints] in GHC.Iface.Recomp.
+-- tag signatures), so they can be computed after the frontend completes
+-- (typecheck + desugar + tidy). See Note [Codegen info and fingerprints]
+-- in GHC.Iface.Recomp.
 --
 -- The resulting interface is suitable for dependent modules to typecheck
 -- and desugar against, but should NOT be written to disk since it lacks
 -- codegen info (CAF/LF info, tag signatures).
 --
--- See Note [Two-phase interface generation] in GHC.Driver.Make
-mkEarlyIface :: HscEnv -> PartialModIface -> IO ModIface
-mkEarlyIface = addFingerprints
+-- See Note [Pipelined compilation] in GHC.Driver.Make
+mkFrontendIface :: HscEnv -> PartialModIface -> IO ModIface
+mkFrontendIface = addFingerprints
 
 -- | Compress an 'ModIface' and share as many values as possible, depending on the 'CompressionIFace' level.
 -- See Note [Sharing of ModIface].

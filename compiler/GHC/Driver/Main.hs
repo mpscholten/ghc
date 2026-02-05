@@ -1316,7 +1316,7 @@ hscDesugarAndSimplify summary (FrontendTypecheck tc_result) tc_warnings mb_old_h
                              hscs_mod_location = ms_location summary,
                              hscs_partial_iface = partial_iface,
                              hscs_old_iface_hash = mb_old_hash,
-                             hscs_early_iface = Nothing
+                             hscs_frontend_iface = Nothing
                            }
 
       Just desugared_guts | gopt Opt_WriteIfSimplifiedCore dflags -> do
