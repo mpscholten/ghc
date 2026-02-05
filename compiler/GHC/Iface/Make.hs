@@ -161,15 +161,16 @@ mkFullIface hsc_env partial_iface mb_stg_infos mb_cmm_infos stubs foreign_files 
     return final_iface
 
 -- | Build full interface reusing fingerprints from an early interface.
--- Skips addFingerprints since fingerprints don't depend on codegen info
--- (CAF/LF info, tag signatures). Only patches in the updated declarations
--- (with codegen info) and simplified core (with foreign stubs).
+-- Skips addFingerprints since fingerprints intentionally exclude codegen-only
+-- IdInfo (CAF/LF info, tag signatures). See Note [Codegen info and fingerprints]
+-- in GHC.Iface.Recomp. Only patches in the updated declarations (with codegen
+-- info) and simplified core (with foreign stubs).
 --
 -- The early interface has type @ModIface@ (phase = 'ModIfaceFinal') with
 -- @mi_decls :: [(Fingerprint, IfaceDecl)]@. We reuse the fingerprints and
 -- replace the IfaceDecl parts with the codegen-updated versions from
--- updateDecl. This is safe because fingerprints only depend on declaration
--- structure (types, classes, instances), not on CAF/LF/tag info.
+-- updateDecl. This is safe because codegen-only IdInfo is excluded from ABI
+-- fingerprints.
 --
 -- See Note [Two-phase interface generation] in GHC.Driver.Make
 mkFullIfaceFromEarly :: HscEnv -> ModIface -> PartialModIface
@@ -186,11 +187,11 @@ mkFullIfaceFromEarly hsc_env early_iface partial_iface
           = updateDecl (mi_decls partial_iface) mb_stg_infos mb_cmm_infos
 
     -- Build a map from OccName to Fingerprint from the early iface.
-    -- The early iface's fingerprints are still valid because fingerprints
-    -- don't depend on codegen info (CAF/LF info, tag signatures).
-    -- We must match by OccName rather than by position because
-    -- addFingerprints sorts declarations by OccName, while the partial
-    -- iface has declarations in TypeEnv order (non-deterministic).
+    -- The early iface's fingerprints are still valid because codegen-only
+    -- IdInfo is excluded from fingerprints (see Note [Codegen info and
+    -- fingerprints] in GHC.Iface.Recomp). We must match by OccName rather than
+    -- by position because addFingerprints sorts declarations by OccName, while
+    -- the partial iface has declarations in TypeEnv order (non-deterministic).
     let fp_map = Map.fromList
           [(getOccName d, fp) | (fp, d) <- mi_decls early_iface]
 
@@ -226,8 +227,9 @@ mkFullIfaceFromEarly hsc_env early_iface partial_iface
 --
 -- This computes real fingerprints for the interface, which allows dependent
 -- modules to desugar (not just typecheck) against the early interface.
--- The fingerprints only depend on declaration structure (types, classes, etc.),
--- not on codegen info (CAF/LF info), so they can be computed early.
+-- The fingerprints intentionally exclude codegen-only IdInfo (CAF/LF info,
+-- tag signatures), so they can be computed early. See Note [Codegen info and
+-- fingerprints] in GHC.Iface.Recomp.
 --
 -- The resulting interface is suitable for dependent modules to typecheck
 -- and desugar against, but should NOT be written to disk since it lacks

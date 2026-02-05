@@ -1385,7 +1385,8 @@ addAbiHashes hsc_env info
          = do let hash_fn = mk_put_name local_env
                   decl = abiDecl abi
                --pprTrace "fingerprinting" (ppr (ifName decl) ) $ do
-              let !hash = computeFingerprint hash_fn abi
+              -- See Note [Codegen info and fingerprints]
+              let !hash = computeFingerprint hash_fn (IfaceDeclABIHash abi)
               env' <- extend_hash_env local_env (hash,decl)
               return (env', (hash,decl) : decls_w_hashes)
 
@@ -1398,7 +1399,8 @@ addAbiHashes hsc_env info
                let hash_fn = mk_put_name local_env1
                -- pprTrace "fingerprinting" (ppr (map ifName decls) ) $ do
                 -- put the cycle in a canonical order
-               let !hash = computeFingerprint hash_fn stable_abis
+                -- See Note [Codegen info and fingerprints]
+               let !hash = computeFingerprint hash_fn (map IfaceDeclABIHash stable_abis)
                let pairs = zip (map (bumpFingerprint hash) [0..]) stable_decls
                 -- See Note [Fingerprinting recursive groups]
                local_env2 <- foldM extend_hash_env local_env pairs
@@ -1621,9 +1623,57 @@ Items (c)-(f) are not stored in the IfaceDecl, but instead appear
 elsewhere in the interface file.  But they are *fingerprinted* with
 the declaration itself. This is done by grouping (c)-(f) in IfaceDeclExtras,
 and fingerprinting that as part of the declaration.
+
+Note [Codegen info and fingerprints]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Some IdInfo items are only produced by the code generator and must be
+excluded from ABI fingerprints:
+
+  - HsNoCafRefs: CAF (Constant Applicative Form) info
+  - HsLFInfo: Lambda Form info for the code generator
+  - HsTagSig: Tag signature info
+
+These are attached late during compilation (after STG/Cmm) and are treated
+conservatively when absent. See Note [Conveying CAF-info and LFInfo between
+modules] in GHC.StgToCmm.Types and Note [The LFInfo of Imported Ids] in
+GHC.StgToCmm.Closure.
+
+We exclude these from fingerprints by stripping them in 'IfaceDeclABIHash'
+before hashing. This ensures that:
+
+1. Frontend interfaces (produced before codegen) have the same fingerprints
+   as final interfaces (produced after codegen), enabling pipelined compilation
+   where dependent modules can proceed before codegen completes.
+
+2. Changes to codegen-only info don't trigger spurious recompilation of
+   downstream modules that don't actually depend on this info.
+
+The 'stripCgIfaceDecl' function performs the stripping, and is also used
+in 'freeNamesDeclABI' for consistency.
 -}
 
 type IfaceDeclABI = (Module, IfaceDecl, IfaceDeclExtras)
+
+-- | Wrapper for hashing IfaceDeclABI that strips codegen-only IdInfo.
+-- See Note [Codegen info and fingerprints]
+newtype IfaceDeclABIHash = IfaceDeclABIHash IfaceDeclABI
+
+instance Binary IfaceDeclABIHash where
+  get _bh = panic "no get for IfaceDeclABIHash"
+  put_ bh (IfaceDeclABIHash (modu, decl, extras)) =
+    put_ bh (modu, stripCgIfaceDecl decl, extras)
+
+-- | Strip codegen-only IdInfo from an IfaceDecl.
+-- See Note [Codegen info and fingerprints]
+stripCgIfaceDecl :: IfaceDecl -> IfaceDecl
+stripCgIfaceDecl decl@(IfaceId { ifIdInfo = infos }) =
+  decl { ifIdInfo = filter (not . isCgInfoItem) infos }
+  where
+    isCgInfoItem HsNoCafRefs   = True
+    isCgInfoItem (HsLFInfo _)  = True
+    isCgInfoItem (HsTagSig _)  = True
+    isCgInfoItem _             = False
+stripCgIfaceDecl decl = decl
 
 data IfaceDeclExtras
   = IfaceIdExtras IfaceIdExtras
@@ -1682,7 +1732,8 @@ cmp_abiNames abi1 abi2 = getOccName (abiDecl abi1) `compare`
 
 freeNamesDeclABI :: IfaceDeclABI -> NameSet
 freeNamesDeclABI (_mod, decl, extras) =
-  freeNamesIfDecl decl `unionNameSet` freeNamesDeclExtras extras
+  -- See Note [Codegen info and fingerprints]
+  freeNamesIfDecl (stripCgIfaceDecl decl) `unionNameSet` freeNamesDeclExtras extras
 
 freeNamesDeclExtras :: IfaceDeclExtras -> NameSet
 freeNamesDeclExtras (IfaceIdExtras id_extras)

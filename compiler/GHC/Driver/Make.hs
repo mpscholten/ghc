@@ -2045,14 +2045,15 @@ With two-phase interface generation:
 This allows A to start typechecking and desugaring as soon as B's typecheck
 is done, while B continues with its own codegen in parallel.
 
-Key insight: Fingerprints do NOT depend on codegen info
+Key insight: Fingerprints exclude codegen-only IdInfo
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 The crucial insight is that interface fingerprints only depend on:
 - Declaration structure (types, classes, instances)
 - Fixities, annotations, rules
 - Dependencies
 
-They do NOT depend on CAF info, LF info, or tag signatures. This means we can
+They intentionally exclude CAF info, LF info, and tag signatures (see
+Note [Codegen info and fingerprints] in GHC.Iface.Recomp). This means we can
 compute real fingerprints for early interfaces, which allows dependent modules
 to desugar (not just typecheck) against early interfaces. The `mkRecompUsageInfo`
 function uses fingerprints to record what the module depends on, and previously
@@ -2073,7 +2074,7 @@ Implementation:
 2. In hscPipelineWithEarlySignal (GHC.Driver.Pipeline):
    - After T_HscPostTc completes, we have the partial interface (includes unfoldings)
    - We call mkEarlyIface which uses addFingerprints to compute real fingerprints
-   - The early interface has real fingerprints but no CAF/LF info
+   - The early interface has real fingerprints but no CAF/LF/tag info
    - The early signal callback is invoked with this interface
 
 3. In buildSingleModule (this module):
@@ -2083,9 +2084,13 @@ Implementation:
      interfaces for typecheck and desugar
 
 4. The partial HomeModInfo uses:
-   - The early interface (WITH fingerprints and unfoldings, WITHOUT CAF/LF info)
+   - The early interface (WITH fingerprints and unfoldings, WITHOUT CAF/LF/tag info)
    - Proper ModDetails computed via initModDetails (needed for type lookups)
    - emptyHomeModInfoLinkable (no linkable yet)
+
+   Missing CAF/LF/tag info is handled conservatively by codegen, so we do not
+   retroactively update IdInfo in desugared Core when full interfaces arrive.
+   See Note [Conveying CAF-info and LFInfo between modules] in GHC.StgToCmm.Types.
 
 5. Error handling with withPartialIfaceGuard:
    - The withPartialIfaceGuard helper wraps the module action and guarantees
