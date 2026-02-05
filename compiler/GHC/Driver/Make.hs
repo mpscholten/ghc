@@ -2156,8 +2156,6 @@ Benefits:
 9. Performance:
    - Pipelined signaling is enabled for all builds to ensure thorough testing
    - The partialIfaceVar is signal-only to avoid retaining frontend ModIface objects
-   - The frontend ModIface is threaded through HscBackendAction (hscs_frontend_iface)
-     so the backend can reuse it instead of calling addFingerprints again
    - The overhead of MVars is minimal compared to compilation time
 -}
 

@@ -51,12 +51,6 @@ data HscBackendAction
           -- exists. Pass to `hscMaybeWriteIface` when writing the interface to
           -- avoid updating the existing interface when the interface isn't
           -- changed.
-        , hscs_frontend_iface :: !(Maybe ModIface)
-          -- ^ Optional frontend @ModIface@ from pipelined compilation
-          -- (fingerprints computed, no codegen IdInfo).
-          -- When present, the backend can skip 'addFingerprints' and
-          -- just patch in codegen info.
-          -- See Note [Pipelined compilation] in GHC.Driver.Make
         }
 
 -- | Linkables produced by @hscRecompStatus@. Might contain serialized core
@@ -75,7 +69,7 @@ instance Outputable HscRecompStatus where
 
 instance Outputable HscBackendAction where
   ppr (HscUpdate mi) = text "Update:" <+> (ppr (mi_module mi))
-  ppr (HscRecomp _ ml _mi _mf _fi) = text "Recomp:" <+> ppr ml
+  ppr (HscRecomp _ ml _mi _mf) = text "Recomp:" <+> ppr ml
 
 instance Outputable RecompLinkables where
   ppr (RecompLinkables l1 l2) = ppr l1 $$ ppr l2

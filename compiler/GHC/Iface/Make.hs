@@ -12,7 +12,6 @@
 module GHC.Iface.Make
    ( mkPartialIface
    , mkFullIface
-   , mkFullIfaceFromFrontend
    , mkFrontendIface
    , mkIfaceTc
    , mkRecompUsageInfo
@@ -93,7 +92,6 @@ import GHC.Unit.Module.WholeCoreBindings (encodeIfaceForeign, emptyIfaceForeign)
 
 import Data.Function
 import Data.List ( sortBy )
-import qualified Data.Map as Map
 import Data.Ord
 import Data.IORef
 import Data.Traversable
@@ -158,73 +156,6 @@ mkFullIface hsc_env partial_iface mb_stg_infos mb_cmm_infos stubs foreign_files 
     putDumpFileMaybe (hsc_logger hsc_env) Opt_D_dump_hi "FINAL INTERFACE" FormatText
       (pprModIface unit_state full_iface)
     final_iface <- shareIface (hsc_NC hsc_env) (flagsToIfCompression $ hsc_dflags hsc_env) full_iface
-    return final_iface
-
--- | Build full interface reusing fingerprints from a frontend interface.
--- Skips addFingerprints since fingerprints intentionally exclude codegen-only
--- IdInfo (CAF/LF info, tag signatures). See Note [Codegen info and fingerprints]
--- in GHC.Iface.Recomp. Only patches in the updated declarations (with codegen
--- info) and simplified core (with foreign stubs).
---
--- The frontend interface has type @ModIface@ (phase = 'ModIfaceFinal') with
--- @mi_decls :: [(Fingerprint, IfaceDecl)]@. We reuse the fingerprints and
--- replace the IfaceDecl parts with the codegen-updated versions from
--- updateDecl. This is safe because codegen-only IdInfo is excluded from ABI
--- fingerprints.
---
--- Terminology:
---   * frontend_iface: full @ModIface@ from frontend (fingerprinted, no codegen IdInfo)
---   * partial_iface: @PartialModIface@ from frontend; backend patches codegen-only info
---
--- See Note [Pipelined compilation] in GHC.Driver.Make
-mkFullIfaceFromFrontend :: HscEnv -> ModIface -> PartialModIface
-                        -> Maybe StgCgInfos -> Maybe CmmCgInfos
-                        -> ForeignStubs -> [(ForeignSrcLang, FilePath)]
-                        -> IO ModIface
-mkFullIfaceFromFrontend hsc_env frontend_iface partial_iface
-                        mb_stg_infos mb_cmm_infos stubs foreign_files = do
-    -- Update declarations with codegen info (CAF/LF/tag info).
-    let updated_decls
-          | gopt Opt_OmitInterfacePragmas (hsc_dflags hsc_env)
-          = mi_decls partial_iface
-          | otherwise
-          = updateDecl (mi_decls partial_iface) mb_stg_infos mb_cmm_infos
-
-    -- Build a map from OccName to Fingerprint from the frontend iface.
-    -- The frontend iface's fingerprints are still valid because codegen-only
-    -- IdInfo is excluded from fingerprints (see Note [Codegen info and
-    -- fingerprints] in GHC.Iface.Recomp). We must match by OccName rather than
-    -- by position because addFingerprints sorts declarations by OccName, while
-    -- the partial iface has declarations in TypeEnv order (non-deterministic).
-    let fp_map = Map.fromList
-          [(getOccName d, fp) | (fp, d) <- mi_decls frontend_iface]
-
-    -- Pair each updated declaration with its fingerprint from the frontend
-    -- iface, then sort by OccName to match the canonical order produced
-    -- by addFingerprints (see GHC.Iface.Recomp).
-    let decls = Map.elems $ Map.fromList
-          [(getOccName d, (fp, d))
-          | d <- updated_decls
-          , Just fp <- [Map.lookup (getOccName d) fp_map]
-          ]
-
-    -- See Note [Foreign stubs and TH bytecode linking]
-    -- Use the frontend iface's mi_simplified_core (which has extra decls sorted
-    -- by binding_key from addFingerprints) rather than the partial iface's
-    -- unsorted version.  We only need to update the foreign stubs.
-    mi_simplified_core <- for (mi_simplified_core frontend_iface) $ \simpl_core -> do
-        fs <- encodeIfaceForeign (hsc_logger hsc_env) (hsc_dflags hsc_env) stubs foreign_files
-        return $ (simpl_core { mi_sc_foreign = fs })
-
-    -- Patch the frontend iface with codegen info, reusing its fingerprints
-    let patched = set_mi_simplified_core mi_simplified_core
-                $ set_mi_decls decls frontend_iface
-
-    -- Debug printing
-    let unit_state = hsc_units hsc_env
-    putDumpFileMaybe (hsc_logger hsc_env) Opt_D_dump_hi "FINAL INTERFACE" FormatText
-      (pprModIface unit_state patched)
-    final_iface <- shareIface (hsc_NC hsc_env) (flagsToIfCompression $ hsc_dflags hsc_env) patched
     return final_iface
 
 -- | Create a frontend interface for pipelined compilation.

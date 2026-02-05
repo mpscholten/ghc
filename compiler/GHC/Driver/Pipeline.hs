@@ -94,7 +94,7 @@ import GHC.Data.StringBuffer   ( hPutStringBuffer )
 import GHC.Data.Maybe          ( expectJust )
 import qualified System.OsPath as SysOsPath
 
-import GHC.Iface.Make          ( mkFullIface, mkFullIfaceFromFrontend, mkFrontendIface )
+import GHC.Iface.Make          ( mkFullIface, mkFrontendIface )
 import GHC.Iface.Load          ( getGhcPrimIface )
 import GHC.Runtime.Loader      ( initializePlugins )
 
@@ -924,9 +924,7 @@ hscPipelineWithEarlySignal pipe_env (hsc_env_with_plugins, mod_sum, hsc_recomp_s
       -- Create a frontend HomeModInfo with proper ModDetails for dependents to use
       -- We return the frontend details so caller can reuse them instead of calling
       -- initModDetails again.
-      -- Also thread the frontend iface into HscBackendAction so the backend can
-      -- skip addFingerprints and just patch in codegen info.
-      (mb_frontend_details, hscBackendAction) <- case mb_frontend_signal of
+      mb_frontend_details <- case mb_frontend_signal of
         Just signal -> liftIO $ do
           case hscBackendAction0 of
             HscRecomp { hscs_partial_iface = partial_iface } -> do
@@ -937,16 +935,13 @@ hscPipelineWithEarlySignal pipe_env (hsc_env_with_plugins, mod_sum, hsc_recomp_s
               -- Compute ModDetails so dependents can look up types
               frontend_details <- initModDetails hsc_env_with_plugins frontend_iface
               signal (HomeModInfo frontend_iface frontend_details emptyHomeModInfoLinkable)
-              -- Thread frontend iface into HscBackendAction so the backend can
-              -- reuse fingerprints instead of calling addFingerprints again
-              let !action' = hscBackendAction0 { hscs_frontend_iface = Just frontend_iface }
-              return (Just frontend_details, action')
+              return (Just frontend_details)
             HscUpdate iface -> do
               details <- initModDetails hsc_env_with_plugins iface
               signal (HomeModInfo iface details emptyHomeModInfoLinkable)
-              return (Just details, hscBackendAction0)
-        Nothing -> return (Nothing, hscBackendAction0)
-      (iface, linkables) <- hscBackendPipeline pipe_env hsc_env_with_plugins mod_sum hscBackendAction
+              return (Just details)
+        Nothing -> return Nothing
+      (iface, linkables) <- hscBackendPipeline pipe_env hsc_env_with_plugins mod_sum hscBackendAction0
       return (iface, linkables, mb_frontend_details)
 
 hscBackendPipeline :: P m => PipeEnv -> HscEnv -> ModSummary -> HscBackendAction -> m (ModIface, RecompLinkables)
@@ -969,12 +964,7 @@ hscBackendPipeline pipe_env hsc_env mod_sum result =
   else
     case result of
       HscUpdate iface ->  return (iface, emptyRecompLinkables)
-      HscRecomp {} -> do
-        final_iface <- case hscs_frontend_iface result of
-          -- Reuse frontend iface: no codegen info to add, skip addFingerprints
-          Just fi -> liftIO $ mkFullIfaceFromFrontend hsc_env fi (hscs_partial_iface result) Nothing Nothing NoStubs []
-          Nothing -> liftIO $ mkFullIface hsc_env (hscs_partial_iface result) Nothing Nothing NoStubs []
-        return (final_iface, emptyRecompLinkables)
+      HscRecomp {} -> (,) <$> liftIO (mkFullIface hsc_env (hscs_partial_iface result) Nothing Nothing NoStubs []) <*> pure emptyRecompLinkables
 
 hscGenBackendPipeline :: P m
   => PipeEnv
