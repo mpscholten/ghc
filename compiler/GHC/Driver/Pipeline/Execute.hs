@@ -543,7 +543,7 @@ runHscBackendPhase pipe_env hsc_env mod_name src_flavour location result = do
                   hscs_mod_location = mod_location,
                   hscs_partial_iface = partial_iface,
                   hscs_old_iface_hash = mb_old_iface_hash,
-                  hscs_early_iface = mb_early_iface
+                  hscs_frontend_iface = mb_frontend_iface
                 }
         -> if not (backendGeneratesCode (backend dflags)) then
              panic "HscRecomp not relevant for NoBackend"
@@ -561,9 +561,9 @@ runHscBackendPhase pipe_env hsc_env mod_name src_flavour location result = do
                     | gopt Opt_WriteIfSimplifiedCore dflags = (cg_foreign cgguts, cg_foreign_files cgguts)
                     | otherwise = (NoStubs, [])
 
-              final_iface <- case mb_early_iface of
-                -- Reuse early iface fingerprints, skip addFingerprints
-                Just ei -> mkFullIfaceFromEarly hsc_env ei partial_iface stg_infos cg_infos iface_stubs iface_files
+              final_iface <- case mb_frontend_iface of
+                -- Reuse frontend iface fingerprints, skip addFingerprints
+                Just fi -> mkFullIfaceFromFrontend hsc_env fi partial_iface stg_infos cg_infos iface_stubs iface_files
                 Nothing -> mkFullIface hsc_env partial_iface stg_infos cg_infos iface_stubs iface_files
 
               -- See Note [Writing interface files]
@@ -586,9 +586,9 @@ runHscBackendPhase pipe_env hsc_env mod_name src_flavour location result = do
               -- In interpreted mode the regular codeGen backend is not run so we
               -- generate a interface without codeGen info.
             do
-              final_iface <- case mb_early_iface of
-                -- Reuse early iface fingerprints, skip addFingerprints
-                Just ei -> mkFullIfaceFromEarly hsc_env ei partial_iface Nothing Nothing NoStubs []
+              final_iface <- case mb_frontend_iface of
+                -- Reuse frontend iface fingerprints, skip addFingerprints
+                Just fi -> mkFullIfaceFromFrontend hsc_env fi partial_iface Nothing Nothing NoStubs []
                 Nothing -> mkFullIface hsc_env partial_iface Nothing Nothing NoStubs []
               hscMaybeWriteIface logger dflags True final_iface mb_old_iface_hash location
               bc <- generateAndWriteByteCodeLinkable hsc_env (mkCgInteractiveGuts cgguts) mod_location

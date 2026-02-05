@@ -956,27 +956,27 @@ waitResult :: ResultVar a -> MaybeT IO a
 waitResult (ResultVar f var) = MaybeT (fmap f <$> readMVar var)
 
 -- | Result of building a module.
--- For two-phase compilation, we have separate signaling for:
--- 1. Partial interface ready (after typechecking) - allows dependents to start typechecking
+-- For pipelined compilation, we have separate signaling for:
+-- 1. Frontend interface ready (after frontend) - allows dependents to start their frontend
 -- 2. Full result ready (after codegen) - allows dependents to start codegen
--- See Note [Two-phase interface generation]
+-- See Note [Pipelined compilation]
 data BuildResult = BuildResult { _resultOrigin :: ResultOrigin
                                , resultVar    :: ResultVar (Maybe HomeModInfo)
                                -- ^ Full result, signaled after complete compilation
                                , partialIfaceVar :: Maybe (MVar (Maybe ()))
-                               -- ^ Signal-only MVar for two-phase compilation.
-                               -- Just () = partial interface is ready (in the HUG).
+                               -- ^ Signal-only MVar for pipelined compilation.
+                               -- Just () = frontend interface is ready (in the HUG).
                                -- Nothing = module failed before signaling.
                                -- Outer Maybe is Nothing for non-module nodes.
                                --
                                -- Important: this intentionally does NOT hold the ModIface.
                                -- BuildLoopState.buildDep retains all BuildResults for the
                                -- entire upsweep, so storing the ModIface here would keep
-                               -- every module's early interface alive (~22 MB each) until
-                               -- the build completes. Instead, the early ModIface is placed
-                               -- into the HUG by early_signal_callback, and dependents look
-                               -- it up from there.
-                               -- See Note [Two-phase interface generation]
+                               -- every module's frontend interface alive (~22 MB each) until
+                               -- the build completes. Instead, the frontend ModIface is placed
+                               -- into the HUG by the frontend signal callback, and dependents
+                               -- look it up from there.
+                               -- See Note [Pipelined compilation]
                                }
 
 -- The origin of this result var, useful for debugging
@@ -992,9 +992,9 @@ data BuildLoopState = BuildLoopState { buildDep :: M.Map NodeKey BuildResult
                                           -- the appropriate result of compiling a module  but with
                                           -- cycles there can be additional indirection and can point to the result of typechecking a loop
                                      , nNODE :: Int
-                                     , bls_two_phase :: !Bool
-                                          -- ^ Use two-phase interface signaling? Only useful for parallel builds.
-                                          -- See Note [Two-phase interface generation]
+                                     , bls_pipelining :: !Bool
+                                          -- ^ Use pipelined interface signaling? Only useful for parallel builds.
+                                          -- See Note [Pipelined compilation]
                                      }
 
 nodeId :: BuildM Int
@@ -1030,12 +1030,12 @@ interpretBuildPlan :: HomeUnitGraph
                    -> Maybe ModIfaceCache
                    -> M.Map ModNodeKeyWithUid HomeModInfo
                    -> [BuildPlan]
-                   -> Bool  -- ^ Use two-phase interface signaling (only useful for parallel builds)
+                   -> Bool  -- ^ Use pipelined interface signaling (only useful for parallel builds)
                    -> IO ( Maybe [ModuleGraphNode] -- Is there an unresolved cycle
                          , [MakeAction] -- Actions we need to run in order to build everything
                          , IO [Maybe (Maybe HomeModInfo)]) -- An action to query to get all the built modules at the end.
-interpretBuildPlan hug mhmi_cache old_hpt plan two_phase = do
-  ((mcycle, plans), build_map) <- runStateT (buildLoop plan) (BuildLoopState M.empty 1 two_phase)
+interpretBuildPlan hug mhmi_cache old_hpt plan pipelining = do
+  ((mcycle, plans), build_map) <- runStateT (buildLoop plan) (BuildLoopState M.empty 1 pipelining)
   let wait = collect_results (buildDep build_map)
   return (mcycle, plans, wait)
 
@@ -1094,12 +1094,12 @@ interpretBuildPlan hug mhmi_cache old_hpt plan two_phase = do
           !build_deps = getDependencies direct_deps build_map
       -- Create MVars before building the action so they can be captured
       res_var <- liftIO newEmptyMVar
-      -- For ModuleNode, create a partial interface MVar for two-phase compilation
-      -- Only create if two-phase signaling is enabled (parallel builds)
-      -- See Note [Two-phase interface generation]
-      two_phase <- gets bls_two_phase
+      -- For ModuleNode, create a partial interface MVar for pipelined compilation
+      -- Only create if pipelining is enabled (parallel builds)
+      -- See Note [Pipelined compilation]
+      pipelining <- gets bls_pipelining
       partial_iface_var <- case mod of
-        ModuleNode {} | two_phase -> liftIO $ Just <$> newEmptyMVar
+        ModuleNode {} | pipelining -> liftIO $ Just <$> newEmptyMVar
         _ -> return Nothing
 
       !build_action <-
@@ -1114,11 +1114,11 @@ interpretBuildPlan hug mhmi_cache old_hpt plan two_phase = do
                 let !old_hmi = M.lookup (mnKey ms) old_hpt
                     rehydrate_mods = mapMaybe nodeKeyModName <$> rehydrate_nodes
                 mod_idx <- nodeId
-                -- Create early signal callback for two-phase compilation
-                -- See Note [Two-phase interface generation]
-                let early_signal_callback = case partial_iface_var of
+                -- Create frontend signal callback for pipelined compilation
+                -- See Note [Pipelined compilation]
+                let frontend_signal_callback = case partial_iface_var of
                       Just var -> Just $ \partial_hmi -> do
-                        -- Add early HomeModInfo to HUG FIRST, so dependents can look it up
+                        -- Add frontend HomeModInfo to HUG FIRST, so dependents can look it up
                         -- as soon as they wake up. The HomeModInfo has proper ModDetails
                         -- with TypeEnv for lookups.
                         -- This will be replaced by the full HomeModInfo after codegen completes.
@@ -1127,28 +1127,28 @@ interpretBuildPlan hug mhmi_cache old_hpt plan two_phase = do
                         -- We signal with Just () rather than the ModIface itself
                         -- because buildDep retains all BuildResults for the entire
                         -- upsweep. Storing the ModIface in the MVar would keep every
-                        -- module's early interface (~22 MB each) pinned in memory
+                        -- module's frontend interface (~22 MB each) pinned in memory
                         -- until the build completes, causing a significant space leak.
                         putMVar var (Just ())
                       Nothing -> Nothing
                 -- Check if this module needs full deps (not just partial interfaces)
                 let home_mod_names = mapMaybe nodeKeyModName (M.keys build_map)
                 return $ withCurrentUnit (mgNodeUnitId mod) $ do
-                     -- See Note [Two-phase interface generation] for details on when we need full deps.
+                     -- See Note [Pipelined compilation] for details on when we need full deps.
                      hsc_env <- asks hsc_env
                      let needs_full_deps = isJust $ needsFullDeps hsc_env ms rehydrate_mods home_mod_names
-                     -- See Note [Two-phase interface generation] for why this guard is needed.
+                     -- See Note [Pipelined compilation] for why this guard is needed.
                      withPartialIfaceGuard partial_iface_var $ do
-                       if two_phase && not needs_full_deps
+                       if pipelining && not needs_full_deps
                          then void $ wait_partial_ifaces build_deps
                          else void $ wait_deps build_deps
-                       hmi <- executeCompileNode mod_idx n_mods old_hmi hug rehydrate_mods ms early_signal_callback
+                       hmi <- executeCompileNode mod_idx n_mods old_hmi hug rehydrate_mods ms frontend_signal_callback
                        -- Write the HMI to an external cache (if one exists)
                        -- See Note [Caching HomeModInfo]
                        liftIO $ forM mhmi_cache $ \hmi_cache -> addHmiToCache hmi_cache hmi
                        -- Add the full HomeModInfo to HUG. This intentionally replaces any
-                       -- partial HomeModInfo that was added by early_signal_callback during
-                       -- two-phase compilation. See Note [Two-phase interface generation].
+                       -- partial HomeModInfo that was added by frontend_signal_callback
+                       -- during pipelined compilation. See Note [Pipelined compilation].
                        liftIO $ HUG.addHomeModInfoToHug hmi hug
                        return (Just hmi)
               LinkNode _nks uid -> do
@@ -1251,10 +1251,10 @@ upsweep
     -> [BuildPlan]
     -> IO (SuccessFlag, [HomeModInfo])
 upsweep n_jobs hsc_env hmi_cache diag_wrapper mHscMessage old_hpt build_plan = do
-    -- Enable two-phase signaling for all builds to ensure the code path is tested
-    -- even in single-threaded mode. See Note [Two-phase interface generation]
-    let two_phase = True
-    (cycle, pipelines, collect_result) <- interpretBuildPlan (hsc_HUG hsc_env) hmi_cache old_hpt build_plan two_phase
+    -- Enable pipelining for all builds to ensure the code path is tested
+    -- even in single-threaded mode. See Note [Pipelined compilation]
+    let pipelining = True
+    (cycle, pipelines, collect_result) <- interpretBuildPlan (hsc_HUG hsc_env) hmi_cache old_hpt build_plan pipelining
     runPipelines n_jobs hsc_env diag_wrapper mHscMessage pipelines
     res <- collect_result
     let sec = initSourceErrorContext (hsc_dflags hsc_env)
@@ -1289,20 +1289,20 @@ upsweep_inst hsc_env mHscMessage mod_index nmods uid iuid = do
 
 -- | Compile a single module. Always produce a Linkable for it if
 -- successful. If no compilation happened, return the old Linkable.
--- The optional early signal callback is invoked after typechecking completes,
--- allowing dependent modules to start earlier with the early interface.
--- See Note [Two-phase interface generation]
+-- The optional frontend signal callback is invoked after the frontend completes,
+-- allowing dependent modules to start their frontend earlier.
+-- See Note [Pipelined compilation]
 upsweep_mod :: HscEnv
             -> Maybe Messager
             -> Maybe HomeModInfo
             -> ModSummary
             -> Int  -- index of module
             -> Int  -- total number of modules
-            -> Maybe (HomeModInfo -> IO ())  -- ^ callback for early interface signal
+            -> Maybe (HomeModInfo -> IO ())  -- ^ callback for frontend interface signal
             -> IO HomeModInfo
-upsweep_mod hsc_env mHscMessage old_hmi summary mod_index nmods mb_early_signal = do
+upsweep_mod hsc_env mHscMessage old_hmi summary mod_index nmods mb_frontend_signal = do
   compileOneWithEarlySignal mHscMessage hsc_env summary
-              mod_index nmods (hm_iface <$> old_hmi) (maybe emptyHomeModInfoLinkable hm_linkable old_hmi) mb_early_signal
+              mod_index nmods (hm_iface <$> old_hmi) (maybe emptyHomeModInfoLinkable hm_linkable old_hmi) mb_frontend_signal
 
 
 -- Note [When source is considered modified]
@@ -1636,28 +1636,28 @@ executeInstantiationNode k n deps uid iu = do
 --    and artifacts from disk.
 
 -- | Execute the compilation of a module node.
--- The optional early signal callback is invoked after typechecking completes,
--- allowing dependent modules to start earlier.
--- See Note [Two-phase interface generation]
+-- The optional frontend signal callback is invoked after the frontend completes,
+-- allowing dependent modules to start their frontend earlier.
+-- See Note [Pipelined compilation]
 executeCompileNode :: Int
   -> Int
   -> Maybe HomeModInfo
   -> HomeUnitGraph
   -> Maybe [ModuleName] -- List of modules we need to rehydrate before compiling
   -> ModuleNodeInfo
-  -> Maybe (HomeModInfo -> IO ())  -- ^ Optional early interface signal callback
+  -> Maybe (HomeModInfo -> IO ())  -- ^ Optional frontend interface signal callback
   -> RunMakeM HomeModInfo
-executeCompileNode k n !old_hmi hug mrehydrate_mods mni mb_early_signal = do
+executeCompileNode k n !old_hmi hug mrehydrate_mods mni mb_frontend_signal = do
   me@MakeEnv{..} <- ask
   -- Rehydrate any dependencies if this module had a boot file or is a signature file.
   lift $ MaybeT (withAbstractSem compile_sem $ withLoggerHsc k me $ \hsc_env -> do
      hsc_env' <- liftIO $ maybeRehydrateBefore (setHUG hug hsc_env) mni fixed_mrehydrate_mods
      case mni of
-       ModuleNodeCompile mod -> executeCompileNodeWithSource hsc_env' me mod mb_early_signal
+       ModuleNodeCompile mod -> executeCompileNodeWithSource hsc_env' me mod mb_frontend_signal
        ModuleNodeFixed key loc -> do
          -- For fixed modules, signal the interface immediately since it's already compiled
          result <- executeCompileNodeFixed hsc_env' me key loc
-         forM_ result $ \hmi -> forM_ mb_early_signal $ \signal -> signal hmi
+         forM_ result $ \hmi -> forM_ mb_frontend_signal $ \signal -> signal hmi
          return result
     )
 
@@ -1942,7 +1942,7 @@ executeLinkNode hug kn@(k, _) uid deps = do
       Succeeded -> return ()
 
 -- | Reasons why a module must wait for full dependency results (not just partial interfaces).
--- See Note [Two-phase interface generation]
+-- See Note [Pipelined compilation]
 data FullDepsReason
     = NeedsRehydration      -- ^ Has hs-boot files, needs complete HomeModInfo
     | UsesTemplateHaskell   -- ^ TH splices need to run code from dependencies
@@ -1951,7 +1951,7 @@ data FullDepsReason
 
 -- | Determine if a module needs full dependency results before typechecking.
 -- Returns Nothing if partial interfaces suffice, Just reason otherwise.
--- See Note [Two-phase interface generation]
+-- See Note [Pipelined compilation]
 needsFullDeps :: HscEnv
               -> ModuleNodeInfo
               -> Maybe [ModuleName]  -- ^ Rehydration modules (hs-boot files)
@@ -1982,10 +1982,10 @@ needsFullDeps hsc_env mni rehydrate_mods home_mod_names
 -- This prevents dependent modules from blocking forever if this module fails.
 -- The 'finally' ensures the MVar is filled even if:
 -- - Waiting on dependencies fails (dep failed)
--- - Compilation fails before early_signal_callback runs
+-- - Compilation fails before frontend_signal_callback runs
 -- - An async exception is thrown
--- If early_signal_callback already ran, tryPutMVar is a no-op (MVar already full).
--- See Note [Two-phase interface generation]
+-- If frontend_signal_callback already ran, tryPutMVar is a no-op (MVar already full).
+-- See Note [Pipelined compilation]
 withPartialIfaceGuard :: Maybe (MVar (Maybe ()))
                       -> RunMakeM a
                       -> RunMakeM a
@@ -2004,7 +2004,7 @@ wait_deps (x:xs) = do
 -- | Wait for partial interfaces of dependencies to be ready.
 -- This allows dependent modules to start typechecking earlier.
 -- Only waits for the signal; does not retain the ModIface.
--- See Note [Two-phase interface generation]
+-- See Note [Pipelined compilation]
 wait_partial_ifaces :: [BuildResult] -> RunMakeM ()
 wait_partial_ifaces [] = return ()
 wait_partial_ifaces (br:brs) = do
@@ -2025,79 +2025,96 @@ wait_partial_ifaces (br:brs) = do
             void $ lift $ waitResult (resultVar br)
     wait_partial_ifaces brs
 
-{- Note [Two-phase interface generation]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+{- Note [Pipelined compilation]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 When compiling with -j, we want to maximize parallelism. In the standard
 compilation pipeline:
 
-  Module B: typecheck -> codegen -> signal complete
-  Module A: wait for B complete -> typecheck -> desugar -> codegen
+  Module B: frontend -> codegen -> signal complete
+  Module A: wait for B complete -> frontend -> codegen
 
 Module A has to wait for B's codegen to finish, even though A only needs
-B's types (interface) to typecheck and desugar. The codegen info (CAF/LF info)
-is only needed for A's codegen, not A's typechecking or desugaring.
+B's types (interface) to run its frontend. The codegen info (CAF/LF/tag info)
+is only needed for A's codegen, not A's frontend.
 
-With two-phase interface generation:
+With pipelined compilation:
 
-  Module B: typecheck -> signal early -> desugar -> codegen -> signal complete
-  Module A: wait for B early -> typecheck -> desugar -> codegen (async with B)
+  Module B: frontend -> signal frontend done -> codegen -> signal complete
+  Module A: wait for B frontend -> frontend -> codegen (async with B's codegen)
 
-This allows A to start typechecking and desugaring as soon as B's typecheck
-is done, while B continues with its own codegen in parallel.
+This allows A to start its frontend as soon as B's frontend is done, while
+B continues with codegen in parallel.
+
+Pipeline stages:
+- Frontend = typecheck + desugar + tidy + create interface (without codegen info)
+- Backend = STG + Cmm + codegen (adds CAF/LF/tag info to interface)
+
+What the frontend interface contains:
+- Types, classes, instances, exports
+- Unfoldings (for cross-module optimization)
+- Real fingerprints (computed via addFingerprints)
+- Does NOT contain: CAF info, LF info, tag signatures
 
 Key insight: Fingerprints exclude codegen-only IdInfo
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-The crucial insight is that interface fingerprints only depend on:
+Interface fingerprints only depend on:
 - Declaration structure (types, classes, instances)
 - Fixities, annotations, rules
 - Dependencies
 
 They intentionally exclude CAF info, LF info, and tag signatures (see
 Note [Codegen info and fingerprints] in GHC.Iface.Recomp). This means we can
-compute real fingerprints for early interfaces, which allows dependent modules
-to desugar (not just typecheck) against early interfaces. The `mkRecompUsageInfo`
-function uses fingerprints to record what the module depends on, and previously
-panicked when encountering early interfaces with dummy fingerprints.
+compute real fingerprints for frontend interfaces, which allows dependent modules
+to run their entire frontend against frontend interfaces. The `mkRecompUsageInfo`
+function uses fingerprints to record what the module depends on.
 
-By calling `addFingerprints` in `mkEarlyIface` (in GHC.Iface.Make), we compute
-real fingerprints for early interfaces, enabling the full parallelism benefit.
+By calling `addFingerprints` in `mkFrontendIface` (in GHC.Iface.Make), we compute
+real fingerprints for frontend interfaces, enabling the full parallelism benefit.
+
+Why is pipelining safe?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Missing CAF/LF/tag info is handled conservatively by codegen, so we do NOT
+retroactively update IdInfo in desugared Core when full interfaces arrive.
+See Note [Conveying CAF-info and LFInfo between modules] in GHC.StgToCmm.Types.
+
+When dependent module A runs its frontend against B's frontend interface, A's Ids
+get conservative defaults (MayHaveCafRefs) for imported bindings. When A does
+codegen, it re-examines interfaces and may get full info if B's codegen has
+completed by then.
 
 Implementation:
 
 1. BuildResult has two signals:
-   - partialIfaceVar :: Maybe (MVar (Maybe ())) -- signal-only, after typecheck
+   - partialIfaceVar :: Maybe (MVar (Maybe ())) -- signal-only, after frontend
    - resultVar :: ResultVar (Maybe HomeModInfo)  -- after full compilation
    The partialIfaceVar is signal-only (Just () for success, Nothing for failure)
-   to avoid retaining the early ModIface for the entire build. The actual interface
-   is placed in the HUG by early_signal_callback and looked up from there.
+   to avoid retaining the frontend ModIface for the entire build. The actual
+   interface is placed in the HUG by the frontend signal callback and looked up
+   from there.
 
 2. In hscPipelineWithEarlySignal (GHC.Driver.Pipeline):
    - After T_HscPostTc completes, we have the partial interface (includes unfoldings)
-   - We call mkEarlyIface which uses addFingerprints to compute real fingerprints
-   - The early interface has real fingerprints but no CAF/LF/tag info
-   - The early signal callback is invoked with this interface
+   - We call mkFrontendIface which uses addFingerprints to compute real fingerprints
+   - The frontend interface has real fingerprints but no CAF/LF/tag info
+   - The frontend signal callback is invoked with this interface
 
 3. In buildSingleModule (this module):
    - For ModuleNode, we create partialIfaceVar
-   - The early signal callback adds a partial HomeModInfo to HUG and fills the MVar
+   - The frontend signal callback adds a partial HomeModInfo to HUG and fills the MVar
    - We use waitDependencies with WaitPartialIface to wait on dependencies' partial
-     interfaces for typecheck and desugar
+     interfaces for frontend
 
 4. The partial HomeModInfo uses:
-   - The early interface (WITH fingerprints and unfoldings, WITHOUT CAF/LF/tag info)
+   - The frontend interface (WITH fingerprints and unfoldings, WITHOUT CAF/LF/tag info)
    - Proper ModDetails computed via initModDetails (needed for type lookups)
    - emptyHomeModInfoLinkable (no linkable yet)
-
-   Missing CAF/LF/tag info is handled conservatively by codegen, so we do not
-   retroactively update IdInfo in desugared Core when full interfaces arrive.
-   See Note [Conveying CAF-info and LFInfo between modules] in GHC.StgToCmm.Types.
 
 5. Error handling with withPartialIfaceGuard:
    - The withPartialIfaceGuard helper wraps the module action and guarantees
      partialIfaceVar is filled with Nothing on exit (using MC.finally)
    - This prevents dependents from blocking forever if compilation fails before
-     the early_signal_callback runs
-   - If early_signal_callback already ran, tryPutMVar is a no-op (MVar already full)
+     the frontend signal callback runs
+   - If the frontend signal callback already ran, tryPutMVar is a no-op (MVar full)
 
 6. After full compilation:
    - The full HomeModInfo replaces the partial one in HUG
@@ -2110,23 +2127,23 @@ Implementation:
      to propagate the error via MaybeT
 
 8. needsFullDeps and FullDepsReason:
-   - Some modules cannot use two-phase waiting and must wait for full results:
+   - Some modules cannot use pipelined waiting and must wait for full results:
      * NeedsRehydration: Has hs-boot files, needs complete HomeModInfo for rehydration
      * UsesTemplateHaskell: TH splices need to run code from dependencies
      * UsesHomePlugins: Home-module plugins must be loaded and executed first
      * IsBackpackModule: Backpack units need InstantiationNode to complete first
 
 Benefits:
-- Module A can typecheck AND desugar while B is still doing codegen
-- With many modules, this creates a pipeline effect where typecheck/desugar and
-  codegen of different modules run in parallel
-- Cross-module inlining works correctly (unfoldings are in the early interface)
-- Full interfaces get proper CAF/LFInfo once codegen completes
+- Module A can run its entire frontend while B is still doing codegen
+- With many modules, this creates a pipeline effect where frontend and codegen
+  of different modules run in parallel
+- Cross-module inlining works correctly (unfoldings are in the frontend interface)
+- Full interfaces get proper CAF/LF/tag info once codegen completes
 
 9. Performance:
-   - Two-phase signaling is enabled for all builds to ensure thorough testing
-   - The partialIfaceVar is signal-only to avoid retaining early ModIface objects
-   - The early ModIface is threaded through HscBackendAction (hscs_early_iface)
+   - Pipelined signaling is enabled for all builds to ensure thorough testing
+   - The partialIfaceVar is signal-only to avoid retaining frontend ModIface objects
+   - The frontend ModIface is threaded through HscBackendAction (hscs_frontend_iface)
      so the backend can reuse it instead of calling addFingerprints again
    - The overhead of MVars is minimal compared to compilation time
 -}

@@ -94,7 +94,7 @@ import GHC.Data.StringBuffer   ( hPutStringBuffer )
 import GHC.Data.Maybe          ( expectJust )
 import qualified System.OsPath as SysOsPath
 
-import GHC.Iface.Make          ( mkFullIface, mkFullIfaceFromEarly, mkEarlyIface )
+import GHC.Iface.Make          ( mkFullIface, mkFullIfaceFromFrontend, mkFrontendIface )
 import GHC.Iface.Load          ( getGhcPrimIface )
 import GHC.Runtime.Loader      ( initializePlugins )
 
@@ -237,10 +237,10 @@ compileOne' mHscMessage hsc_env0 summary mod_index nmods mb_old_iface mb_old_lin
   compileOneWithEarlySignal mHscMessage hsc_env0 summary mod_index nmods
                             mb_old_iface mb_old_linkable Nothing
 
--- | Like 'compileOne'' but with an early interface signal callback.
--- The callback is invoked after typechecking completes (before codegen),
--- allowing dependent modules to start typechecking earlier.
--- See Note [Two-phase interface generation] in GHC.Driver.Make
+-- | Like 'compileOne'' but with a frontend interface signal callback.
+-- The callback is invoked after the frontend completes (before codegen),
+-- allowing dependent modules to start their frontend earlier.
+-- See Note [Pipelined compilation] in GHC.Driver.Make
 compileOneWithEarlySignal
             :: Maybe Messager
             -> HscEnv
@@ -249,11 +249,11 @@ compileOneWithEarlySignal
             -> Int             -- ^ ... of M
             -> Maybe ModIface  -- ^ old interface, if we have one
             -> HomeModLinkable
-            -> Maybe (HomeModInfo -> IO ())  -- ^ callback for early interface signal
+            -> Maybe (HomeModInfo -> IO ())  -- ^ callback for frontend interface signal
             -> IO HomeModInfo   -- ^ the complete HomeModInfo, if successful
 
 compileOneWithEarlySignal mHscMessage
-            hsc_env0 summary mod_index nmods mb_old_iface mb_old_linkable mb_early_signal
+            hsc_env0 summary mod_index nmods mb_old_iface mb_old_linkable mb_frontend_signal
  = do
 
    debugTraceMsg logger 2 (text "compile: input file" <+> text input_fnpp)
@@ -270,13 +270,13 @@ compileOneWithEarlySignal mHscMessage
    let pipe_env = mkPipeEnv NoStop input_fn Nothing pipelineOutput
    status <- hscRecompStatus mHscMessage plugin_hsc_env upd_summary
                 mb_old_iface mb_old_linkable (mod_index, nmods)
-   let pipeline = hscPipelineWithEarlySignal pipe_env (setDumpPrefix pipe_env plugin_hsc_env, upd_summary, status) mb_early_signal
-   (iface, linkable, mb_early_details) <- runPipeline (hsc_hooks plugin_hsc_env) pipeline
+   let pipeline = hscPipelineWithEarlySignal pipe_env (setDumpPrefix pipe_env plugin_hsc_env, upd_summary, status) mb_frontend_signal
+   (iface, linkable, mb_frontend_details) <- runPipeline (hsc_hooks plugin_hsc_env) pipeline
    -- See Note [ModDetails and --make mode]
-   -- Reuse the early ModDetails if available, avoiding a second initModDetails call.
-   -- The types don't change between typecheck and codegen - only the interface's
-   -- codegen info (CAF/LFInfo) changes.
-   details <- case mb_early_details of
+   -- Reuse the frontend ModDetails if available, avoiding a second initModDetails call.
+   -- The types don't change between frontend and codegen - only the interface's
+   -- codegen info (CAF/LF/tag info) changes.
+   details <- case mb_frontend_details of
      Just d  -> return d
      Nothing -> initModDetails plugin_hsc_env iface
    linkable' <- initWholeCoreBindings plugin_hsc_env iface details linkable
@@ -892,60 +892,60 @@ hscPipeline pipe_env input = do
   return (iface, linkables)
 
 -- | Like 'hscPipeline' but with an optional callback that's invoked after
--- typechecking completes (before codegen). This allows signaling that the
--- partial interface is ready, enabling dependent modules to start earlier.
--- See Note [Two-phase interface generation] in GHC.Driver.Make
+-- frontend completes (before codegen). This allows signaling that the
+-- frontend interface is ready, enabling dependent modules to start earlier.
+-- See Note [Pipelined compilation] in GHC.Driver.Make
 --
--- Returns the early ModDetails if one was computed during signaling, allowing
+-- Returns the frontend ModDetails if one was computed during signaling, allowing
 -- the caller to reuse it instead of calling initModDetails again.
 hscPipelineWithEarlySignal :: P m
   => PipeEnv
   -> (HscEnv, ModSummary, HscRecompStatus)
-  -> Maybe (HomeModInfo -> IO ())  -- ^ Optional callback for early interface signaling
+  -> Maybe (HomeModInfo -> IO ())  -- ^ Optional callback for frontend interface signaling
   -> m (ModIface, RecompLinkables, Maybe ModDetails)
-hscPipelineWithEarlySignal pipe_env (hsc_env_with_plugins, mod_sum, hsc_recomp_status) mb_early_signal = do
+hscPipelineWithEarlySignal pipe_env (hsc_env_with_plugins, mod_sum, hsc_recomp_status) mb_frontend_signal = do
   case hsc_recomp_status of
     HscUpToDate iface mb_linkable -> do
       -- Module is up to date, signal the existing interface with proper ModDetails
       -- Compute ModDetails once and reuse for both signaling and return value
-      mb_early_details <- case mb_early_signal of
+      mb_frontend_details <- case mb_frontend_signal of
         Just signal -> liftIO $ do
           details <- initModDetails hsc_env_with_plugins iface
           signal (HomeModInfo iface details emptyHomeModInfoLinkable)
           return (Just details)
         Nothing -> return Nothing
-      return (iface, mb_linkable, mb_early_details)
+      return (iface, mb_linkable, mb_frontend_details)
     HscRecompNeeded mb_old_hash -> do
       (tc_result, warnings) <- use (T_Hsc hsc_env_with_plugins mod_sum)
 
       hscBackendAction0 <- use (T_HscPostTc hsc_env_with_plugins mod_sum tc_result warnings mb_old_hash)
-      -- Signal partial interface is ready (before codegen)
-      -- Create an "early" HomeModInfo with proper ModDetails for dependents to use
-      -- We return the early details so caller can reuse them instead of calling
-      -- initModDetails again. The types don't change between typecheck and codegen.
-      -- Also thread the early iface into HscBackendAction so the backend can
+      -- Signal frontend interface is ready (before codegen)
+      -- Create a frontend HomeModInfo with proper ModDetails for dependents to use
+      -- We return the frontend details so caller can reuse them instead of calling
+      -- initModDetails again. The types don't change between frontend and codegen.
+      -- Also thread the frontend iface into HscBackendAction so the backend can
       -- skip addFingerprints and just patch in codegen info.
-      (mb_early_details, hscBackendAction) <- case mb_early_signal of
+      (mb_frontend_details, hscBackendAction) <- case mb_frontend_signal of
         Just signal -> liftIO $ do
           case hscBackendAction0 of
             HscRecomp { hscs_partial_iface = partial_iface } -> do
-              -- Create early interface without codegen info (no CAF/LF info)
+              -- Create frontend interface without codegen info (no CAF/LF/tag info)
               -- but with real fingerprints so dependents can desugar
-              early_iface <- mkEarlyIface hsc_env_with_plugins partial_iface
+              frontend_iface <- mkFrontendIface hsc_env_with_plugins partial_iface
               -- Compute ModDetails so dependents can look up types
-              early_details <- initModDetails hsc_env_with_plugins early_iface
-              signal (HomeModInfo early_iface early_details emptyHomeModInfoLinkable)
-              -- Thread early iface into HscBackendAction so the backend can
+              frontend_details <- initModDetails hsc_env_with_plugins frontend_iface
+              signal (HomeModInfo frontend_iface frontend_details emptyHomeModInfoLinkable)
+              -- Thread frontend iface into HscBackendAction so the backend can
               -- reuse fingerprints instead of calling addFingerprints again
-              let !action' = hscBackendAction0 { hscs_early_iface = Just early_iface }
-              return (Just early_details, action')
+              let !action' = hscBackendAction0 { hscs_frontend_iface = Just frontend_iface }
+              return (Just frontend_details, action')
             HscUpdate iface -> do
               details <- initModDetails hsc_env_with_plugins iface
               signal (HomeModInfo iface details emptyHomeModInfoLinkable)
               return (Just details, hscBackendAction0)
         Nothing -> return (Nothing, hscBackendAction0)
       (iface, linkables) <- hscBackendPipeline pipe_env hsc_env_with_plugins mod_sum hscBackendAction
-      return (iface, linkables, mb_early_details)
+      return (iface, linkables, mb_frontend_details)
 
 hscBackendPipeline :: P m => PipeEnv -> HscEnv -> ModSummary -> HscBackendAction -> m (ModIface, RecompLinkables)
 hscBackendPipeline pipe_env hsc_env mod_sum result =
@@ -968,9 +968,9 @@ hscBackendPipeline pipe_env hsc_env mod_sum result =
     case result of
       HscUpdate iface ->  return (iface, emptyRecompLinkables)
       HscRecomp {} -> do
-        final_iface <- case hscs_early_iface result of
-          -- Reuse early iface: no codegen info to add, skip addFingerprints
-          Just ei -> liftIO $ mkFullIfaceFromEarly hsc_env ei (hscs_partial_iface result) Nothing Nothing NoStubs []
+        final_iface <- case hscs_frontend_iface result of
+          -- Reuse frontend iface: no codegen info to add, skip addFingerprints
+          Just fi -> liftIO $ mkFullIfaceFromFrontend hsc_env fi (hscs_partial_iface result) Nothing Nothing NoStubs []
           Nothing -> liftIO $ mkFullIface hsc_env (hscs_partial_iface result) Nothing Nothing NoStubs []
         return (final_iface, emptyRecompLinkables)
 
