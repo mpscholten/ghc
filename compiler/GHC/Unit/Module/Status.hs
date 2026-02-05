@@ -44,16 +44,18 @@ data HscBackendAction
         , hscs_mod_location   :: !ModLocation
           -- ^ Module info
         , hscs_partial_iface  :: !PartialModIface
-          -- ^ Partial interface
+          -- ^ Interface produced by frontend (`T_HscPostTc`), before
+          -- backend codegen patches in CAF/LF/tag info.
         , hscs_old_iface_hash :: !(Maybe Fingerprint)
           -- ^ Old interface hash for this compilation, if an old interface file
           -- exists. Pass to `hscMaybeWriteIface` when writing the interface to
           -- avoid updating the existing interface when the interface isn't
           -- changed.
         , hscs_frontend_iface :: !(Maybe ModIface)
-          -- ^ Frontend interface from pipelined compilation, with fingerprints
-          -- already computed. When present, the backend can skip
-          -- 'addFingerprints' and just patch in codegen info.
+          -- ^ Optional frontend @ModIface@ from pipelined compilation
+          -- (fingerprints computed, no codegen IdInfo).
+          -- When present, the backend can skip 'addFingerprints' and
+          -- just patch in codegen info.
           -- See Note [Pipelined compilation] in GHC.Driver.Make
         }
 

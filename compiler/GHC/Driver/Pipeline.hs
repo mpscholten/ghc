@@ -238,8 +238,9 @@ compileOne' mHscMessage hsc_env0 summary mod_index nmods mb_old_iface mb_old_lin
                             mb_old_iface mb_old_linkable Nothing
 
 -- | Like 'compileOne'' but with a frontend interface signal callback.
--- The callback is invoked after the frontend completes (before codegen),
--- allowing dependent modules to start their frontend earlier.
+-- The callback is invoked at the frontend/backend boundary
+-- (after `T_HscPostTc`, before backend codegen),
+-- allowing dependent modules to start `T_Hsc`/`T_HscPostTc` earlier.
 -- See Note [Pipelined compilation] in GHC.Driver.Make
 compileOneWithEarlySignal
             :: Maybe Messager
@@ -273,9 +274,8 @@ compileOneWithEarlySignal mHscMessage
    let pipeline = hscPipelineWithEarlySignal pipe_env (setDumpPrefix pipe_env plugin_hsc_env, upd_summary, status) mb_frontend_signal
    (iface, linkable, mb_frontend_details) <- runPipeline (hsc_hooks plugin_hsc_env) pipeline
    -- See Note [ModDetails and --make mode]
-   -- Reuse the frontend ModDetails if available, avoiding a second initModDetails call.
-   -- The types don't change between frontend and codegen - only the interface's
-   -- codegen info (CAF/LF/tag info) changes.
+   -- Reuse frontend details if provided by hscPipelineWithEarlySignal.
+   -- These are produced from the frontend interface at signal time.
    details <- case mb_frontend_details of
      Just d  -> return d
      Nothing -> initModDetails plugin_hsc_env iface
@@ -892,8 +892,9 @@ hscPipeline pipe_env input = do
   return (iface, linkables)
 
 -- | Like 'hscPipeline' but with an optional callback that's invoked after
--- frontend completes (before codegen). This allows signaling that the
--- frontend interface is ready, enabling dependent modules to start earlier.
+-- frontend completes (after `T_HscPostTc`, before backend codegen). This allows signaling that the
+-- frontend interface is ready, enabling dependent modules to start
+-- `T_Hsc`/`T_HscPostTc` earlier.
 -- See Note [Pipelined compilation] in GHC.Driver.Make
 --
 -- Returns the frontend ModDetails if one was computed during signaling, allowing
@@ -919,10 +920,10 @@ hscPipelineWithEarlySignal pipe_env (hsc_env_with_plugins, mod_sum, hsc_recomp_s
       (tc_result, warnings) <- use (T_Hsc hsc_env_with_plugins mod_sum)
 
       hscBackendAction0 <- use (T_HscPostTc hsc_env_with_plugins mod_sum tc_result warnings mb_old_hash)
-      -- Signal frontend interface is ready (before codegen)
+      -- Signal frontend interface is ready at the frontend/backend boundary
       -- Create a frontend HomeModInfo with proper ModDetails for dependents to use
       -- We return the frontend details so caller can reuse them instead of calling
-      -- initModDetails again. The types don't change between frontend and codegen.
+      -- initModDetails again.
       -- Also thread the frontend iface into HscBackendAction so the backend can
       -- skip addFingerprints and just patch in codegen info.
       (mb_frontend_details, hscBackendAction) <- case mb_frontend_signal of
@@ -930,7 +931,8 @@ hscPipelineWithEarlySignal pipe_env (hsc_env_with_plugins, mod_sum, hsc_recomp_s
           case hscBackendAction0 of
             HscRecomp { hscs_partial_iface = partial_iface } -> do
               -- Create frontend interface without codegen info (no CAF/LF/tag info)
-              -- but with real fingerprints so dependents can desugar
+              -- but with real fingerprints so dependents can run
+              -- `T_Hsc`/`T_HscPostTc`.
               frontend_iface <- mkFrontendIface hsc_env_with_plugins partial_iface
               -- Compute ModDetails so dependents can look up types
               frontend_details <- initModDetails hsc_env_with_plugins frontend_iface

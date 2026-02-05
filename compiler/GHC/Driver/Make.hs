@@ -957,8 +957,10 @@ waitResult (ResultVar f var) = MaybeT (fmap f <$> readMVar var)
 
 -- | Result of building a module.
 -- For pipelined compilation, we have separate signaling for:
--- 1. Frontend interface ready (after frontend) - allows dependents to start their frontend
--- 2. Full result ready (after codegen) - allows dependents to start codegen
+-- 1. Frontend interface ready (after `T_HscPostTc`): allows dependents to run
+--    their own `T_Hsc`/`T_HscPostTc` work
+-- 2. Full result ready (after backend): required by dependents that must wait for
+--    complete HomeModInfo (see 'needsFullDeps')
 -- See Note [Pipelined compilation]
 data BuildResult = BuildResult { _resultOrigin :: ResultOrigin
                                , resultVar    :: ResultVar (Maybe HomeModInfo)
@@ -990,7 +992,8 @@ mkBuildResult = BuildResult
 data BuildLoopState = BuildLoopState { buildDep :: M.Map NodeKey BuildResult
                                           -- The current way to build a specific TNodeKey, without cycles this just points to
                                           -- the appropriate result of compiling a module  but with
-                                          -- cycles there can be additional indirection and can point to the result of typechecking a loop
+                                          -- cycles there can be additional indirection and can point to
+                                          -- the rehydrated/finalised loop result
                                      , nNODE :: Int
                                      , bls_pipelining :: !Bool
                                           -- ^ Use pipelined interface signaling? Only useful for parallel builds.
@@ -1290,7 +1293,7 @@ upsweep_inst hsc_env mHscMessage mod_index nmods uid iuid = do
 -- | Compile a single module. Always produce a Linkable for it if
 -- successful. If no compilation happened, return the old Linkable.
 -- The optional frontend signal callback is invoked after the frontend completes,
--- allowing dependent modules to start their frontend earlier.
+-- allowing dependent modules to start `T_Hsc`/`T_HscPostTc` earlier.
 -- See Note [Pipelined compilation]
 upsweep_mod :: HscEnv
             -> Maybe Messager
@@ -1637,7 +1640,7 @@ executeInstantiationNode k n deps uid iu = do
 
 -- | Execute the compilation of a module node.
 -- The optional frontend signal callback is invoked after the frontend completes,
--- allowing dependent modules to start their frontend earlier.
+-- allowing dependent modules to start `T_Hsc`/`T_HscPostTc` earlier.
 -- See Note [Pipelined compilation]
 executeCompileNode :: Int
   -> Int
@@ -1949,7 +1952,8 @@ data FullDepsReason
     | UsesHomePlugins       -- ^ Home-module plugins must be loaded first
     | IsBackpackModule      -- ^ Backpack units need InstantiationNode to complete
 
--- | Determine if a module needs full dependency results before typechecking.
+-- | Determine if a module needs full dependency results before starting
+-- `T_Hsc`/`T_HscPostTc`.
 -- Returns Nothing if partial interfaces suffice, Just reason otherwise.
 -- See Note [Pipelined compilation]
 needsFullDeps :: HscEnv
@@ -2002,7 +2006,7 @@ wait_deps (x:xs) = do
     return $ maybe hmis (:hmis) res
 
 -- | Wait for partial interfaces of dependencies to be ready.
--- This allows dependent modules to start typechecking earlier.
+-- This allows dependent modules to start `T_Hsc`/`T_HscPostTc` earlier.
 -- Only waits for the signal; does not retain the ModIface.
 -- See Note [Pipelined compilation]
 wait_partial_ifaces :: [BuildResult] -> RunMakeM ()
@@ -2042,12 +2046,15 @@ With pipelined compilation:
   Module B: frontend -> signal frontend done -> codegen -> signal complete
   Module A: wait for B frontend -> frontend -> codegen (async with B's codegen)
 
-This allows A to start its frontend as soon as B's frontend is done, while
+This allows A to start `T_Hsc`/`T_HscPostTc` as soon as B reaches the
+`T_HscPostTc` boundary, while
 B continues with codegen in parallel.
 
 Pipeline stages:
-- Frontend = typecheck + desugar + tidy + create interface (without codegen info)
-- Backend = STG + Cmm + codegen (adds CAF/LF/tag info to interface)
+- Frontend (in this note) = everything up through `T_HscPostTc`
+  (typecheck, desugar, simplify/tidy, and producing `PartialModIface`)
+- Backend = `hscBackendPipeline` and friends
+  (STG/Cmm/codegen, plus final interface patching/writing)
 
 What the frontend interface contains:
 - Types, classes, instances, exports
@@ -2093,7 +2100,8 @@ Implementation:
    from there.
 
 2. In hscPipelineWithEarlySignal (GHC.Driver.Pipeline):
-   - After T_HscPostTc completes, we have the partial interface (includes unfoldings)
+   - At the frontend/backend boundary (after `T_HscPostTc`) we have
+     `PartialModIface` (including unfoldings)
    - We call mkFrontendIface which uses addFingerprints to compute real fingerprints
    - The frontend interface has real fingerprints but no CAF/LF/tag info
    - The frontend signal callback is invoked with this interface
@@ -2101,8 +2109,9 @@ Implementation:
 3. In buildSingleModule (this module):
    - For ModuleNode, we create partialIfaceVar
    - The frontend signal callback adds a partial HomeModInfo to HUG and fills the MVar
-   - We use waitDependencies with WaitPartialIface to wait on dependencies' partial
-     interfaces for frontend
+   - For dependency waiting we use:
+     * wait_partial_ifaces when frontend interfaces are sufficient
+     * wait_deps when full HomeModInfo is required
 
 4. The partial HomeModInfo uses:
    - The frontend interface (WITH fingerprints and unfoldings, WITHOUT CAF/LF/tag info)
@@ -2125,9 +2134,13 @@ Implementation:
    - wait_deps waits for the full HomeModInfo result
    - On failure (Nothing signal), wait_partial_ifaces falls back to waitResult
      to propagate the error via MaybeT
+   - Signal ordering invariant: a module signals `partialIfaceVar = Just ()` only
+     after inserting its frontend HomeModInfo into the HUG
 
 8. needsFullDeps and FullDepsReason:
-   - Some modules cannot use pipelined waiting and must wait for full results:
+   - Some modules cannot start `T_Hsc`/`T_HscPostTc` from partial interfaces and
+     must wait for
+     full results:
      * NeedsRehydration: Has hs-boot files, needs complete HomeModInfo for rehydration
      * UsesTemplateHaskell: TH splices need to run code from dependencies
      * UsesHomePlugins: Home-module plugins must be loaded and executed first
