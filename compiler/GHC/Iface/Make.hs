@@ -172,6 +172,10 @@ mkFullIface hsc_env partial_iface mb_stg_infos mb_cmm_infos stubs foreign_files 
 -- updateDecl. This is safe because codegen-only IdInfo is excluded from ABI
 -- fingerprints.
 --
+-- Terminology:
+--   * frontend_iface: full @ModIface@ from frontend (fingerprinted, no codegen IdInfo)
+--   * partial_iface: @PartialModIface@ from frontend; backend patches codegen-only info
+--
 -- See Note [Pipelined compilation] in GHC.Driver.Make
 mkFullIfaceFromFrontend :: HscEnv -> ModIface -> PartialModIface
                         -> Maybe StgCgInfos -> Maybe CmmCgInfos
@@ -232,8 +236,8 @@ mkFullIfaceFromFrontend hsc_env frontend_iface partial_iface
 -- (typecheck + desugar + tidy). See Note [Codegen info and fingerprints]
 -- in GHC.Iface.Recomp.
 --
--- The resulting interface is suitable for dependent modules to typecheck
--- and desugar against, but should NOT be written to disk since it lacks
+-- The resulting interface is suitable for dependent modules to run
+-- `T_Hsc`/`T_HscPostTc` against, but should NOT be written to disk since it lacks
 -- codegen info (CAF/LF info, tag signatures).
 --
 -- See Note [Pipelined compilation] in GHC.Driver.Make
