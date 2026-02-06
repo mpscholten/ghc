@@ -1621,7 +1621,6 @@ Items (c)-(f) are not stored in the IfaceDecl, but instead appear
 elsewhere in the interface file.  But they are *fingerprinted* with
 the declaration itself. This is done by grouping (c)-(f) in IfaceDeclExtras,
 and fingerprinting that as part of the declaration.
-
 -}
 
 type IfaceDeclABI = (Module, IfaceDecl, IfaceDeclExtras)
