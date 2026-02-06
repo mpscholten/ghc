@@ -965,10 +965,10 @@ waitResult (ResultVar f var) = MaybeT (fmap f <$> readMVar var)
 data BuildResult = BuildResult { _resultOrigin :: ResultOrigin
                                , resultVar    :: ResultVar (Maybe HomeModInfo)
                                -- ^ Full result, signaled after complete compilation
-                               , partialIfaceVar :: Maybe (MVar (Maybe ()))
+                               , partialIfaceVar :: Maybe (MVar Bool)
                                -- ^ Signal-only MVar for pipelined compilation.
-                               -- Just () = frontend interface is ready (in the HUG).
-                               -- Nothing = module failed before signaling.
+                               -- True = frontend interface is ready (in the HUG).
+                               -- False = module failed before signaling.
                                -- Outer Maybe is Nothing for non-module nodes.
                                --
                                -- Important: this intentionally does NOT hold the ModIface.
@@ -986,7 +986,7 @@ data ResultOrigin = NoLoop | Loop ResultLoopOrigin deriving (Show)
 
 data ResultLoopOrigin = Initialise | Rehydrated | Finalised deriving (Show)
 
-mkBuildResult :: ResultOrigin -> ResultVar (Maybe HomeModInfo) -> Maybe (MVar (Maybe ())) -> BuildResult
+mkBuildResult :: ResultOrigin -> ResultVar (Maybe HomeModInfo) -> Maybe (MVar Bool) -> BuildResult
 mkBuildResult = BuildResult
 
 data BuildLoopState = BuildLoopState { buildDep :: M.Map NodeKey BuildResult
@@ -1127,12 +1127,12 @@ interpretBuildPlan hug mhmi_cache old_hpt plan pipelining = do
                         -- This will be replaced by the full HomeModInfo after codegen completes.
                         HUG.addHomeModInfoToHug partial_hmi hug
                         -- Signal success AFTER updating HUG.
-                        -- We signal with Just () rather than the ModIface itself
+                        -- We signal with True rather than the ModIface itself
                         -- because buildDep retains all BuildResults for the entire
                         -- upsweep. Storing the ModIface in the MVar would keep every
                         -- module's frontend interface (~22 MB each) pinned in memory
                         -- until the build completes, causing a significant space leak.
-                        putMVar var (Just ())
+                        putMVar var True
                       Nothing -> Nothing
                 -- Check if this module needs full deps (not just partial interfaces)
                 let home_mod_names = mapMaybe nodeKeyModName (M.keys build_map)
@@ -1982,7 +1982,7 @@ needsFullDeps hsc_env mni rehydrate_mods home_mod_names
 
     isHomePlugin pluginMod = pluginMod `elem` home_mod_names
 
--- | Run a module action, guaranteeing partial_iface_var is filled with Nothing on exit.
+-- | Run a module action, guaranteeing partial_iface_var is filled with False on exit.
 -- This prevents dependent modules from blocking forever if this module fails.
 -- The 'finally' ensures the MVar is filled even if:
 -- - Waiting on dependencies fails (dep failed)
@@ -1990,11 +1990,11 @@ needsFullDeps hsc_env mni rehydrate_mods home_mod_names
 -- - An async exception is thrown
 -- If frontend_signal_callback already ran, tryPutMVar is a no-op (MVar already full).
 -- See Note [Pipelined compilation]
-withPartialIfaceGuard :: Maybe (MVar (Maybe ()))
+withPartialIfaceGuard :: Maybe (MVar Bool)
                       -> RunMakeM a
                       -> RunMakeM a
 withPartialIfaceGuard mvar action =
-    action `MC.finally` (liftIO $ forM_ mvar $ \v -> void $ tryPutMVar v Nothing)
+    action `MC.finally` (liftIO $ forM_ mvar $ \v -> void $ tryPutMVar v False)
 
 -- | Wait for dependencies to finish, and then return their results.
 -- This is the traditional mode that waits for complete HomeModInfo.
@@ -2016,13 +2016,11 @@ wait_partial_ifaces (br:brs) = do
         Just var -> do
             -- Wait for the signal
             result <- liftIO $ readMVar var
-            case result of
-                Just () -> return ()
-                Nothing -> do
-                    -- Dependency failed before signaling. Propagate failure
-                    -- by waiting on resultVar which will fail via MaybeT.
-                    _ <- lift $ waitResult (resultVar br)
-                    return ()
+            unless result $ do
+                -- Dependency failed before signaling. Propagate failure
+                -- by waiting on resultVar which will fail via MaybeT.
+                _ <- lift $ waitResult (resultVar br)
+                return ()
         Nothing ->
             -- No partial interface var (e.g., module in a loop, or non-module node).
             -- Fall back to waiting on the full result.
@@ -2085,9 +2083,9 @@ completed by then.
 Implementation:
 
 1. BuildResult has two signals:
-   - partialIfaceVar :: Maybe (MVar (Maybe ())) -- signal-only, after frontend
+   - partialIfaceVar :: Maybe (MVar Bool) -- signal-only, after frontend
    - resultVar :: ResultVar (Maybe HomeModInfo)  -- after full compilation
-   The partialIfaceVar is signal-only (Just () for success, Nothing for failure)
+   The partialIfaceVar is signal-only (True for success, False for failure)
    to avoid retaining the frontend ModIface for the entire build. The actual
    interface is placed in the HUG by the frontend signal callback and looked up
    from there.
@@ -2113,7 +2111,7 @@ Implementation:
 
 5. Error handling with withPartialIfaceGuard:
    - The withPartialIfaceGuard helper wraps the module action and guarantees
-     partialIfaceVar is filled with Nothing on exit (using MC.finally)
+     partialIfaceVar is filled with False on exit (using MC.finally)
    - This prevents dependents from blocking forever if compilation fails before
      the frontend signal callback runs
    - If the frontend signal callback already ran, tryPutMVar is a no-op (MVar full)
@@ -2123,11 +2121,11 @@ Implementation:
    - The resultVar is filled with the complete result
 
 7. Waiting:
-   - wait_partial_ifaces waits for the signal-only MVar (Just () or Nothing)
+   - wait_partial_ifaces waits for the signal-only MVar (True or False)
    - wait_deps waits for the full HomeModInfo result
-   - On failure (Nothing signal), wait_partial_ifaces falls back to waitResult
+   - On failure (False signal), wait_partial_ifaces falls back to waitResult
      to propagate the error via MaybeT
-   - Signal ordering invariant: a module signals `partialIfaceVar = Just ()` only
+   - Signal ordering invariant: a module signals `partialIfaceVar = True` only
      after inserting its frontend HomeModInfo into the HUG
 
 8. needsFullDeps and FullDepsReason:
