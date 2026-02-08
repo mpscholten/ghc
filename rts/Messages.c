@@ -190,8 +190,9 @@ uint32_t messageBlackHole(Capability *cap, MessageBlackHole *msg)
     // guarantee that the indirectee is a valid pointer.
 #if defined(THREADED_RTS)
     if (bh_info == &stg_WHITEHOLE_info) {
+      spin_wait_begin();
       while(ACQUIRE_LOAD(&bh->header.info) == &stg_WHITEHOLE_info) {
-        busy_wait_nop();
+        spin_wait_while_eq((StgVolatilePtr)&bh->header.info, (StgWord)&stg_WHITEHOLE_info);
       }
     }
 #endif

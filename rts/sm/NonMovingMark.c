@@ -1344,9 +1344,12 @@ mark_closure (MarkQueue *queue, const StgClosure *p0, StgClosure **origin)
             goto done;
 
         case WHITEHOLE:
+#if defined(PARALLEL_GC)
+            spin_wait_begin();
+#endif
             while (RELAXED_LOAD(&p->header.info) == &stg_WHITEHOLE_info)
 #if defined(PARALLEL_GC)
-                busy_wait_nop()
+                spin_wait_while_eq((StgVolatilePtr)&p->header.info, (StgWord)&stg_WHITEHOLE_info)
 #endif
                 ;
             goto try_again;

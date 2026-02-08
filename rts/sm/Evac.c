@@ -335,13 +335,14 @@ copyPart(StgClosure **p, StgClosure *src, uint32_t size_to_reserve,
     StgWord info;
 
 #if defined(PARALLEL_GC)
+    spin_wait_begin();
 spin:
         info = xchg((StgPtr)&src->header.info, (W_)&stg_WHITEHOLE_info);
         if (info == (W_)&stg_WHITEHOLE_info) {
 #if defined(PROF_SPIN)
             whitehole_gc_spin++;
 #endif /* PROF_SPIN */
-            busy_wait_nop();
+            spin_wait_while_eq((StgVolatilePtr)&src->header.info, (StgWord)&stg_WHITEHOLE_info);
             goto spin;
         }
     if (IS_FORWARDING_PTR(info)) {
@@ -1307,13 +1308,14 @@ selector_chain:
     // In threaded mode, we'll use WHITEHOLE to lock the selector
     // thunk while we evaluate it.
     {
+        spin_wait_begin();
         while(true) {
             info_ptr = xchg((StgPtr)&p->header.info, (W_)&stg_WHITEHOLE_info);
             if (info_ptr != (W_)&stg_WHITEHOLE_info) { break; }
 #if defined(PROF_SPIN)
             ++whitehole_gc_spin;
 #endif
-            busy_wait_nop();
+            spin_wait_while_eq((StgVolatilePtr)&p->header.info, (StgWord)&stg_WHITEHOLE_info);
         }
 
         // make sure someone else didn't get here first...

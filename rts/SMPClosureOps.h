@@ -57,6 +57,7 @@ extern volatile StgWord64 whitehole_lockClosure_yield;
 EXTERN_INLINE StgInfoTable *reallyLockClosure(StgClosure *p)
 {
     StgWord info;
+    spin_wait_begin();
     do {
         uint32_t i = 0;
         do {
@@ -65,7 +66,7 @@ EXTERN_INLINE StgInfoTable *reallyLockClosure(StgClosure *p)
 #if defined(PROF_SPIN)
             NONATOMIC_ADD(&whitehole_lockClosure_spin, 1);
 #endif
-            busy_wait_nop();
+            spin_wait_while_eq((StgVolatilePtr)&p->header.info, (StgWord)&stg_WHITEHOLE_info);
         } while (++i < SPIN_COUNT);
 #if defined(PROF_SPIN)
         NONATOMIC_ADD(&whitehole_lockClosure_yield, 1);

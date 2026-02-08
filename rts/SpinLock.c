@@ -60,10 +60,11 @@ ATTR_ALWAYS_INLINE static inline bool try_acquire_spin_slow_path(SpinLock * p)
 
 void acquire_spin_lock_slow_path(SpinLock * p)
 {
+    spin_wait_begin();
     do {
         for (uint32_t i = 0; i < SPIN_COUNT; i++) {
             if (try_acquire_spin_slow_path(p)) return;
-            busy_wait_nop();
+            spin_wait_while_eq((StgVolatilePtr)&p->lock, 0);
         }
         IF_PROF_SPIN(RELAXED_ADD(&p->yield, 1));
         yieldThread();

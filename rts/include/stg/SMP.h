@@ -97,6 +97,9 @@ EXTERN_INLINE StgWord atomic_dec(StgVolatilePtr p, StgWord n);
  */
 EXTERN_INLINE void busy_wait_nop(void);
 
+EXTERN_INLINE void spin_wait_begin(void);
+EXTERN_INLINE void spin_wait_while_eq(StgVolatilePtr addr, StgWord expected);
+
 #endif // !IN_STG_CODE
 
 /*
@@ -501,6 +504,53 @@ busy_wait_nop(void)
     __asm__ __volatile__ ("rep; nop");
 #else
     // nothing
+#endif
+}
+
+/*
+ * Value-aware spin-wait for AArch64 WFE.
+ *
+ * spin_wait_begin(): call once before a spin loop.
+ * On AArch64 issues SEVL to prime the event register,
+ * ensuring we don't miss events that fired before we started.
+ *
+ * spin_wait_while_eq(addr, expected): if *addr == expected,
+ * execute WFE to sleep until an event; the exclusive-monitor
+ * sequence is used to make relevant writes generate wake events.
+ * If *addr != expected, return immediately.
+ */
+EXTERN_INLINE void spin_wait_begin(void);
+EXTERN_INLINE void
+spin_wait_begin(void)
+{
+#if defined(aarch64_HOST_ARCH)
+    __asm__ __volatile__ ("sevl");
+#endif
+}
+
+EXTERN_INLINE void spin_wait_while_eq(StgVolatilePtr addr, StgWord expected);
+EXTERN_INLINE void
+spin_wait_while_eq(StgVolatilePtr addr, StgWord expected)
+{
+#if defined(i386_HOST_ARCH) || defined(x86_64_HOST_ARCH)
+    (void)addr;
+    (void)expected;
+    __asm__ __volatile__ ("rep; nop");
+#elif defined(aarch64_HOST_ARCH)
+    StgWord val;
+    __asm__ __volatile__ (
+        "ldxr %0, [%1]\n\t"
+        "cmp %0, %2\n\t"
+        "b.ne 1f\n\t"
+        "wfe\n"
+        "1:"
+        : "=&r" (val)
+        : "r" (addr), "r" (expected)
+        : "cc", "memory"
+    );
+#else
+    (void)addr;
+    (void)expected;
 #endif
 }
 
