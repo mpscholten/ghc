@@ -118,6 +118,7 @@ import GHC.Driver.Errors
 import GHC.Driver.Messager
 import GHC.Driver.Errors.Types
 import GHC.Driver.CodeOutput
+import GHC.Driver.Phases (StopPhase(..))
 import GHC.Driver.Config.Cmm.Parser (initCmmParserConfig)
 import GHC.Driver.Config.Core.Opt.Simplify ( initSimplifyExprOpts )
 import GHC.Driver.Config.Core.Lint ( endPassHscEnvIO )
@@ -1955,9 +1956,11 @@ hscSimpleIface' mb_core_program tc_result summary = do
 
 -- | Compile to hard-code.
 hscGenHardCode :: HscEnv -> CgGuts -> ModLocation -> FilePath
-               -> IO (FilePath, Maybe FilePath, [(ForeignSrcLang, FilePath)], Maybe StgCgInfos, Maybe CmmCgInfos )
-                -- ^ @Just f@ <=> _stub.c is f
-hscGenHardCode hsc_env cgguts mod_loc output_filename = do
+               -> Maybe FilePath -- ^ .o output path for piped asm
+               -> StopPhase      -- ^ Stop phase from pipeline
+               -> IO (FilePath, Maybe FilePath, [(ForeignSrcLang, FilePath)], Maybe StgCgInfos, Maybe CmmCgInfos, Bool )
+                -- ^ @Just f@ <=> _stub.c is f; Bool = asm was piped
+hscGenHardCode hsc_env cgguts mod_loc output_filename mb_obj_path stop_phase = do
         let CgGuts{ cg_module   = this_mod,
                     cg_binds    = core_binds,
                     cg_ccs      = local_ccs
@@ -2108,7 +2111,7 @@ hscGenHardCode hsc_env cgguts mod_loc output_filename = do
 
               -- do the unfortunately effectual business
               stgToJS logger js_config stg_binds this_mod spt_entries foreign_stubs0 cost_centre_info output_filename
-              return (output_filename, stub_c_exists, foreign_fps, Just stg_cg_infos, Just cmm_cg_infos)
+              return (output_filename, stub_c_exists, foreign_fps, Just stg_cg_infos, Just cmm_cg_infos, False)
 
             _          ->
               do
@@ -2132,12 +2135,13 @@ hscGenHardCode hsc_env cgguts mod_loc output_filename = do
                                      `appendStubC` prof_init
                                      `appendStubC` cgIPEStub st
 
-              (output_filename, (_stub_h_exists, stub_c_exists), foreign_fps, cmm_cg_infos)
+              (output_filename, (_stub_h_exists, stub_c_exists), foreign_fps, cmm_cg_infos, asm_piped)
                   <- {-# SCC "codeOutput" #-}
                     codeOutput logger tmpfs llvm_config dflags (hsc_units hsc_env) this_mod output_filename mod_loc
                     foreign_stubs foreign_files dependencies (initDUniqSupply 'n' 0) rawcmms1
+                    mb_obj_path stop_phase
               return  ( output_filename, stub_c_exists, foreign_fps
-                      , Just stg_cg_infos, Just cmm_cg_infos)
+                      , Just stg_cg_infos, Just cmm_cg_infos, asm_piped)
 
 
 -- The part of CgGuts that we need for HscInteractive
@@ -2316,9 +2320,9 @@ hscCompileCmmFile hsc_env original_filename filename output_filename = runHsc hs
                   let ip_init = ipInitCode do_info_table platform cmm_mod
                   in NoStubs `appendStubC` ip_init
               | otherwise     = NoStubs
-        (_output_filename, (_stub_h_exists, stub_c_exists), _foreign_fps, _caf_infos)
+        (_output_filename, (_stub_h_exists, stub_c_exists), _foreign_fps, _caf_infos, _asm_piped)
           <- codeOutput logger tmpfs llvm_config dflags (hsc_units hsc_env) cmm_mod output_filename no_loc foreign_stubs [] S.empty
-             dus1 rawCmms
+             dus1 rawCmms Nothing NoStop
         return stub_c_exists
   where
     no_loc = OsPathModLocation

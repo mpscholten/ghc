@@ -10,6 +10,7 @@ module GHC.Driver.CodeOutput
    , outputForeignStubs
    , profilingInitCode
    , ipInitCode
+   , canPipeAsm
    )
 where
 
@@ -30,12 +31,17 @@ import GHC.Cmm.CLabel
 import GHC.StgToCmm.CgUtils (CgStream)
 
 import GHC.Driver.DynFlags
+import GHC.Driver.Session (picCCOpts)
 import GHC.Driver.Config.Finder    ( initFinderOpts   )
 import GHC.Driver.Config.CmmToAsm  ( initNCGConfig    )
 import GHC.Driver.Config.CmmToLlvm ( initLlvmCgConfig )
 import GHC.Driver.LlvmConfigCache  (LlvmConfigCache)
 import GHC.Driver.Ppr
 import GHC.Driver.Backend
+import GHC.Driver.Phases (StopPhase(..))
+
+import GHC.SysTools.Tasks (withAsPiped)
+import GHC.Utils.Misc (withAtomicRename)
 
 import GHC.Data.OsPath qualified as OsPath
 import qualified GHC.Data.ShortText as ST
@@ -89,12 +95,15 @@ codeOutput
     -> DUniqSupply -- ^ The deterministic unique supply to run the CgStream.
                    -- See Note [Deterministic Uniques in the CG]
     -> CgStream RawCmmGroup a -- ^ Compiled C--
+    -> Maybe FilePath -- ^ .o output path, if piped asm is possible
+    -> StopPhase      -- ^ Stop phase from pipeline
     -> IO (FilePath,
            (Bool{-stub_h_exists-}, Maybe FilePath{-stub_c_exists-}),
            [(ForeignSrcLang, FilePath)]{-foreign_fps-},
-           a)
+           a,
+           Bool{-asm_piped-})
 codeOutput logger tmpfs llvm_config dflags unit_state this_mod filenm location genForeignStubs foreign_fps pkg_deps dus0
-  cmm_stream
+  cmm_stream mb_obj_path stop_phase
   =
     do  {
         -- Lint each CmmGroup as it goes past
@@ -122,15 +131,37 @@ codeOutput logger tmpfs llvm_config dflags unit_state this_mod filenm location g
                   ; return (stubs, a) }
 
         ; let dus1 = newTagDUniqSupply CodeGenTag dus0
-        ; (stubs, a) <- case backendCodeOutput (backend dflags) of
-                 NcgCodeOutput  -> outputAsm logger dflags this_mod location filenm dus1
+        ; ((stubs, a), asm_piped) <- case backendCodeOutput (backend dflags) of
+                 NcgCodeOutput
+                   | Just objPath <- mb_obj_path
+                   , canPipeAsm dflags stop_phase
+                   -> do result <- outputAsmPiped logger dflags this_mod location
+                                                  objPath dus1 final_stream
+                         return (result, True)
+                   | otherwise
+                   -> do result <- outputAsm logger dflags this_mod location filenm dus1
                                              final_stream
-                 ViaCCodeOutput -> outputC logger dflags filenm dus1 final_stream pkg_deps
-                 LlvmCodeOutput -> outputLlvm logger llvm_config dflags filenm dus1 final_stream
-                 JSCodeOutput   -> outputJS logger llvm_config dflags filenm final_stream
+                         return (result, False)
+                 ViaCCodeOutput -> do result <- outputC logger dflags filenm dus1 final_stream pkg_deps
+                                      return (result, False)
+                 LlvmCodeOutput -> do result <- outputLlvm logger llvm_config dflags filenm dus1 final_stream
+                                      return (result, False)
+                 JSCodeOutput   -> do result <- outputJS logger llvm_config dflags filenm final_stream
+                                      return (result, False)
         ; stubs_exist <- outputForeignStubs logger tmpfs dflags unit_state this_mod location stubs
-        ; return (filenm, stubs_exist, foreign_fps, a)
+        ; return (filenm, stubs_exist, foreign_fps, a, asm_piped)
         }
+
+-- | Check whether piped assembly is possible
+canPipeAsm :: DynFlags -> StopPhase -> Bool
+canPipeAsm dflags stop_phase =
+    gopt Opt_PipeAsm dflags
+    && not (gopt Opt_KeepSFiles dflags)
+    && not is_stop_as
+  where
+    is_stop_as = case stop_phase of
+      StopAs -> True
+      _      -> False
 
 -- | See Note [Initializers and finalizers in Cmm] in GHC.Cmm.InitFini for details.
 emitInitializerDecls :: Module -> ForeignStubs -> CgStream RawCmmGroup ()
@@ -210,6 +241,46 @@ outputAsm logger dflags this_mod location filenm dus cmm_stream = do
       fmap fst $
       runUDSMT dus $ setTagUDSMT CodeGenTag $
       nativeCodeGen logger (toolSettings dflags) ncg_config location h cmm_stream
+
+-- | Output assembly piped directly to the assembler process, overlapping
+-- assembler startup with code generation. The .o file is produced directly.
+outputAsmPiped :: Logger
+               -> DynFlags
+               -> Module
+               -> ModLocation
+               -> FilePath    -- ^ .o output path
+               -> DUniqSupply
+               -> CgStream RawCmmGroup a
+               -> IO a
+outputAsmPiped logger dflags this_mod location objPath dus cmm_stream = do
+  debugTraceMsg logger 4 (text "Piping asm to assembler, output:" <+> text objPath)
+  let ncg_config = initNCGConfig dflags this_mod
+      platform = targetPlatform dflags
+      pic_c_flags = picCCOpts dflags
+      as_args =
+        -- See Note [-fPIC for assembler]
+        map Option pic_c_flags
+        -- See Note [Produce big objects on Windows]
+        ++ [ Option "-Wa,-mbig-obj"
+           | platformOS platform == OSMinGW32
+           , not $ target32Bit platform
+           ]
+        -- See Note [-Wa,--no-type-check on wasm32]
+        ++ [ Option "-Wa,--no-type-check"
+           | platformArch platform == ArchWasm32
+           ]
+        ++ [ Option "-x", Option "assembler"
+           , Option "-c"
+           , Option "-"
+           , Option "-o"
+           ]
+  withAtomicRename objPath $ \tempObjPath -> do
+    let full_args = as_args ++ [FileOption "" tempObjPath]
+    withAsPiped logger dflags full_args $ \stdinH -> do
+      {-# SCC "NativeCodeGen" #-}
+        fmap fst $
+        runUDSMT dus $ setTagUDSMT CodeGenTag $
+        nativeCodeGen logger (toolSettings dflags) ncg_config location stdinH cmm_stream
 
 {-
 ************************************************************************

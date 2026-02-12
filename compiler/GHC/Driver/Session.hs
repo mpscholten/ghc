@@ -2570,6 +2570,7 @@ fFlagsDeps = [
   flagSpec "omit-yields"                      Opt_OmitYields,
   flagSpec "optimal-applicative-do"           Opt_OptimalApplicativeDo,
   flagSpec "pedantic-bottoms"                 Opt_PedanticBottoms,
+  flagSpec "pipe-asm"                         Opt_PipeAsm,
   flagSpec "pre-inlining"                     Opt_SimplPreInlining,
   flagGhciSpec "print-bind-contents"          Opt_PrintBindContents,
   flagGhciSpec "print-bind-result"            Opt_PrintBindResult,

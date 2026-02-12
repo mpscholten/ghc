@@ -35,7 +35,7 @@ data TPhase res where
               -> Messages GhcMessage
               -> Maybe Fingerprint
               -> TPhase HscBackendAction
-  T_HscBackend :: PipeEnv -> HscEnv -> ModuleName -> HscSource -> ModLocation -> HscBackendAction -> TPhase ([FilePath], ModIface, HomeModLinkable, FilePath)
+  T_HscBackend :: PipeEnv -> HscEnv -> ModuleName -> HscSource -> ModLocation -> HscBackendAction -> TPhase ([FilePath], ModIface, HomeModLinkable, FilePath, Bool)
   T_CmmCpp :: PipeEnv -> HscEnv -> FilePath -> TPhase FilePath
   T_Cmm :: PipeEnv -> HscEnv -> FilePath -> TPhase ([FilePath], FilePath)
   T_Cc :: Phase -> PipeEnv -> HscEnv -> Maybe ModLocation -> FilePath -> TPhase FilePath

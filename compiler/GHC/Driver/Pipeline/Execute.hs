@@ -504,7 +504,7 @@ runHscBackendPhase :: PipeEnv
                    -> HscSource
                    -> ModLocation
                    -> HscBackendAction
-                   -> IO ([FilePath], ModIface, HomeModLinkable, FilePath)
+                   -> IO ([FilePath], ModIface, HomeModLinkable, FilePath, Bool)
 runHscBackendPhase pipe_env hsc_env mod_name src_flavour location result = do
   let dflags = hsc_dflags hsc_env
       logger = hsc_logger hsc_env
@@ -518,7 +518,7 @@ runHscBackendPhase pipe_env hsc_env mod_name src_flavour location result = do
                 -- In Interpreter way, there is just no linkable for hs-boot files
                 -- and we don't want to write an empty `o-boot` file when we're not
                 -- supposed to be writing any .o files (#22669)
-                return ([], iface, emptyHomeModInfoLinkable, o_file)
+                return ([], iface, emptyHomeModInfoLinkable, o_file, False)
              | otherwise -> do
                  case src_flavour of
                    HsigFile -> do
@@ -538,7 +538,7 @@ runHscBackendPhase pipe_env hsc_env mod_name src_flavour location result = do
                  -- linkable (.o-boot) which we check for in `Iface/Recomp.hs` and
                  -- then will carry around the linkable if we're doing
                  -- recompilation.
-                 return ([], iface, emptyHomeModInfoLinkable, o_file)
+                 return ([], iface, emptyHomeModInfoLinkable, o_file, False)
       HscRecomp { hscs_guts = cgguts,
                   hscs_mod_location = mod_location,
                   hscs_partial_iface = partial_iface,
@@ -549,8 +549,12 @@ runHscBackendPhase pipe_env hsc_env mod_name src_flavour location result = do
            else if backendWritesFiles (backend dflags) then
              do
               output_fn <- phaseOutputFilenameNew next_phase pipe_env hsc_env (Just location)
-              (outputFilename, mStub, foreign_files, stg_infos, cg_infos) <-
+              -- Compute the .o path for piped asm
+              obj_fn <- phaseOutputFilenameNew StopLn pipe_env hsc_env (Just location)
+              createDirectoryIfMissing True (takeDirectory obj_fn)
+              (outputFilename, mStub, foreign_files, stg_infos, cg_infos, asm_piped) <-
                 hscGenHardCode hsc_env cgguts mod_location output_fn
+                  (Just obj_fn) (stop_phase pipe_env)
 
               stub_o <- mapM (compileStub hsc_env) mStub
               foreign_os <-
@@ -572,11 +576,10 @@ runHscBackendPhase pipe_env hsc_env mod_name src_flavour location result = do
 
                   else return emptyHomeModInfoLinkable
 
-              -- This is awkward, no linkable is produced here because we still
-              -- have some way to do before the object file is produced
-              -- In future we can split up the driver logic more so that this function
-              -- is in TPipeline and in this branch we can invoke the rest of the backend phase.
-              return (fos, final_iface, mlinkable, outputFilename)
+              -- When asm was piped, the .o file is already produced;
+              -- return the .o path so T_As can be skipped.
+              let finalOutputFilename = if asm_piped then obj_fn else outputFilename
+              return (fos, final_iface, mlinkable, finalOutputFilename, asm_piped)
 
            else
               -- In interpreted mode the regular codeGen backend is not run so we
@@ -585,7 +588,7 @@ runHscBackendPhase pipe_env hsc_env mod_name src_flavour location result = do
               final_iface <- mkFullIface hsc_env partial_iface Nothing Nothing NoStubs []
               hscMaybeWriteIface logger dflags True final_iface mb_old_iface_hash location
               bc <- generateAndWriteByteCodeLinkable hsc_env (mkCgInteractiveGuts cgguts) mod_location
-              return ([], final_iface, emptyHomeModInfoLinkable { homeMod_bytecode = Just bc } , panic "interpreter")
+              return ([], final_iface, emptyHomeModInfoLinkable { homeMod_bytecode = Just bc } , panic "interpreter", False)
 
 
 runUnlitPhase :: HscEnv -> FilePath -> FilePath -> IO FilePath

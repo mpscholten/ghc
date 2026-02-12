@@ -13,6 +13,7 @@ module GHC.SysTools.Process
   , runSomethingResponseFile
   , runSomethingFiltered
   , runSomethingWith
+  , withBuilderPiped
   ) where
 
 import GHC.Prelude
@@ -358,3 +359,78 @@ breakIntColon xs = case break (':' ==) xs of
 data BuildMessage
   = BuildMsg   !SDoc
   | BuildError !SrcLoc !SDoc
+
+-- | Bracket-style function that starts an external tool process with stdin
+-- piped. The user action writes to stdin, and on completion (or exception)
+-- the bracket guarantees cleanup: close stdin, wait/terminate process.
+--
+-- This is used to pipe assembly output directly to the assembler, overlapping
+-- assembler startup with code generation.
+withBuilderPiped
+  :: Logger
+  -> ([String] -> [String])  -- ^ Filter function for stderr lines
+  -> String              -- ^ phase name for error messages
+  -> String              -- ^ program path
+  -> [Option]            -- ^ arguments
+  -> Maybe FilePath      -- ^ working directory
+  -> Maybe [(String, String)] -- ^ environment
+  -> (Handle -> IO a)    -- ^ action that writes to process stdin
+  -> IO a
+withBuilderPiped logger filter_fn phase_name pgm args mb_cwd mb_env action = do
+  let real_args = filter notNull (map showOpt args)
+      cmdLine = showCommandForUser pgm real_args
+  traceCmd logger phase_name cmdLine $ handleProc pgm phase_name $ do
+    withPipe $ \(errReadEnd, errWriteEnd) -> do
+#if defined(__IO_MANAGER_WINIO__)
+      return () <!> do
+        associateHandle' =<< handleToHANDLE errReadEnd
+#endif
+      mask $ \restore -> do
+        let procdata =
+              enableProcessJobs
+              $ (proc pgm real_args) {
+                cwd = mb_cwd
+              , env = mb_env
+              , std_in  = CreatePipe
+              , std_out = UseHandle errWriteEnd
+              , std_err = UseHandle errWriteEnd
+              }
+        (Just hStdIn, Nothing, Nothing, hProcess) <- restore $
+          createProcess_ "withBuilderPiped" procdata
+        hClose errWriteEnd
+
+        -- Set up error output reading thread
+        errMVar <- newEmptyMVar
+        _ <- forkIO $ do
+          getLocaleEncoding >>= hSetEncoding errReadEnd
+          hSetNewlineMode errReadEnd nativeNewlineMode
+          hSetBuffering errReadEnd LineBuffering
+          messages <- parseBuildMessages . filter_fn . lines <$> hGetContents errReadEnd
+          mapM_ processBuildMessage messages
+          putMVar errMVar ()
+
+        -- Run the user's action (writing to stdin)
+        r <- try $ restore $ action hStdIn
+
+        -- Close stdin to signal EOF to the process
+        hClose hStdIn
+
+        case r of
+          Left (SomeException e) -> do
+            terminateProcess hProcess
+            _ <- waitForProcess hProcess
+            throw e
+          Right a -> do
+            -- Wait for error reader to finish
+            takeMVar errMVar
+            -- Wait for process and check exit code
+            exitCode <- waitForProcess hProcess
+            return (exitCode, a)
+  where
+    processBuildMessage :: BuildMessage -> IO ()
+    processBuildMessage msg = do
+      case msg of
+        BuildMsg m -> do
+          logInfo logger $ withPprStyle defaultUserStyle m
+        BuildError loc m -> do
+          reportError logger neverQualify emptyDiagOpts (mkSrcSpan loc loc) m
