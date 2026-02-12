@@ -31,7 +31,6 @@ import GHC.Cmm.CLabel
 import GHC.StgToCmm.CgUtils (CgStream)
 
 import GHC.Driver.DynFlags
-import GHC.Driver.Session (picCCOpts)
 import GHC.Driver.Config.Finder    ( initFinderOpts   )
 import GHC.Driver.Config.CmmToAsm  ( initNCGConfig    )
 import GHC.Driver.Config.CmmToLlvm ( initLlvmCgConfig )
@@ -39,8 +38,11 @@ import GHC.Driver.LlvmConfigCache  (LlvmConfigCache)
 import GHC.Driver.Ppr
 import GHC.Driver.Backend
 import GHC.Driver.Phases (StopPhase(..))
+import GHC.Driver.Hooks (runPhaseHook)
+import GHC.Driver.Env.Types (HscEnv(..))
 
 import GHC.SysTools.Tasks (withAsPiped)
+import GHC.Driver.Session (picCCOpts)
 import GHC.Utils.Misc (withAtomicRename)
 
 import GHC.Data.OsPath qualified as OsPath
@@ -67,6 +69,7 @@ import GHC.Types.Unique.DSM
 import GHC.Types.Unique.Supply ( UniqueTag(..) )
 
 import System.IO
+import Data.Maybe (isJust)
 import Data.Set (Set)
 import qualified Data.Set as Set
 
@@ -97,13 +100,14 @@ codeOutput
     -> CgStream RawCmmGroup a -- ^ Compiled C--
     -> Maybe FilePath -- ^ .o output path, if piped asm is possible
     -> StopPhase      -- ^ Stop phase from pipeline
+    -> Maybe HscEnv   -- ^ HscEnv for checking PhaseHook
     -> IO (FilePath,
            (Bool{-stub_h_exists-}, Maybe FilePath{-stub_c_exists-}),
            [(ForeignSrcLang, FilePath)]{-foreign_fps-},
            a,
            Bool{-asm_piped-})
 codeOutput logger tmpfs llvm_config dflags unit_state this_mod filenm location genForeignStubs foreign_fps pkg_deps dus0
-  cmm_stream mb_obj_path stop_phase
+  cmm_stream mb_obj_path stop_phase mb_hsc_env
   =
     do  {
         -- Lint each CmmGroup as it goes past
@@ -134,7 +138,7 @@ codeOutput logger tmpfs llvm_config dflags unit_state this_mod filenm location g
         ; ((stubs, a), asm_piped) <- case backendCodeOutput (backend dflags) of
                  NcgCodeOutput
                    | Just objPath <- mb_obj_path
-                   , canPipeAsm dflags stop_phase
+                   , canPipeAsm mb_hsc_env dflags stop_phase
                    -> do result <- outputAsmPiped logger dflags this_mod location
                                                   objPath dus1 final_stream
                          return (result, True)
@@ -152,16 +156,21 @@ codeOutput logger tmpfs llvm_config dflags unit_state this_mod filenm location g
         ; return (filenm, stubs_exist, foreign_fps, a, asm_piped)
         }
 
--- | Check whether piped assembly is possible
-canPipeAsm :: DynFlags -> StopPhase -> Bool
-canPipeAsm dflags stop_phase =
+-- | Check whether piped assembly is possible.
+-- See Note [Piped assembly output]
+canPipeAsm :: Maybe HscEnv -> DynFlags -> StopPhase -> Bool
+canPipeAsm mb_hsc_env dflags stop_phase =
     gopt Opt_PipeAsm dflags
     && not (gopt Opt_KeepSFiles dflags)
     && not is_stop_as
+    && not has_phase_hook
   where
     is_stop_as = case stop_phase of
       StopAs -> True
       _      -> False
+    has_phase_hook = case mb_hsc_env of
+      Just hsc_env -> isJust (runPhaseHook (hsc_hooks hsc_env))
+      Nothing      -> False
 
 -- | See Note [Initializers and finalizers in Cmm] in GHC.Cmm.InitFini for details.
 emitInitializerDecls :: Module -> ForeignStubs -> CgStream RawCmmGroup ()
@@ -242,6 +251,30 @@ outputAsm logger dflags this_mod location filenm dus cmm_stream = do
       runUDSMT dus $ setTagUDSMT CodeGenTag $
       nativeCodeGen logger (toolSettings dflags) ncg_config location h cmm_stream
 
+{-
+Note [Piped assembly output]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+When the NCG backend is used, we can overlap assembler startup latency with
+code generation by piping assembly directly to the assembler's stdin instead
+of writing a temp .s file and invoking the assembler separately.
+
+The flow is:
+  1. Spawn the assembler process with stdin=pipe, stdout/stderr=pipe
+  2. The NCG writes assembly to the pipe via BufHandle
+  3. On completion, close stdin (EOF), wait for the assembler to finish
+  4. Check the assembler's exit code
+
+This saves ~20-50ms per module on macOS (where clang startup is expensive).
+
+Piping is disabled when:
+  - -fno-pipe-asm is set by the user
+  - -keep-s-files is set (user wants to inspect the .s file)
+  - -S stop phase (assembly output is the final product)
+  - A PhaseHook is installed (plugins may want to intercept T_As)
+
+See: canPipeAsm, outputAsmPiped, AsmOutput
+-}
+
 -- | Output assembly piped directly to the assembler process, overlapping
 -- assembler startup with code generation. The .o file is produced directly.
 outputAsmPiped :: Logger
@@ -256,10 +289,9 @@ outputAsmPiped logger dflags this_mod location objPath dus cmm_stream = do
   debugTraceMsg logger 4 (text "Piping asm to assembler, output:" <+> text objPath)
   let ncg_config = initNCGConfig dflags this_mod
       platform = targetPlatform dflags
-      pic_c_flags = picCCOpts dflags
       as_args =
         -- See Note [-fPIC for assembler]
-        map Option pic_c_flags
+        map Option (picCCOpts dflags)
         -- See Note [Produce big objects on Windows]
         ++ [ Option "-Wa,-mbig-obj"
            | platformOS platform == OSMinGW32

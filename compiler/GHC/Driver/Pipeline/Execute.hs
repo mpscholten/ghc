@@ -251,6 +251,20 @@ runLlvmOptPhase pipe_env hsc_env input_fn = do
     return output_fn
 
 
+-- | Common platform-specific assembler flags shared between file-based
+-- and piped assembly paths.
+-- See Note [-fPIC for assembler], Note [Produce big objects on Windows],
+-- Note [-Wa,--no-type-check on wasm32]
+asmPlatformOpts :: DynFlags -> [Option]
+asmPlatformOpts dflags =
+    map Option (picCCOpts dflags)
+    ++ [ Option "-Wa,-mbig-obj"
+       | platformOS platform == OSMinGW32
+       , not $ target32Bit platform ]
+    ++ [ Option "-Wa,--no-type-check"
+       | platformArch platform == ArchWasm32 ]
+  where platform = targetPlatform dflags
+
 -- Run either 'clang' or 'gcc' phases
 runGenericAsPhase :: (Logger -> DynFlags -> [Option] -> IO ()) -> [Option] -> Bool -> PipeEnv -> HscEnv -> Maybe ModLocation -> FilePath -> IO FilePath
 runGenericAsPhase run_as extra_opts with_cpp pipe_env hsc_env location input_fn = do
@@ -259,7 +273,6 @@ runGenericAsPhase run_as extra_opts with_cpp pipe_env hsc_env location input_fn 
         let unit_env   = hsc_unit_env hsc_env
 
         let cmdline_include_paths = includePaths dflags
-        let pic_c_flags = picCCOpts dflags
 
         output_fn <- phaseOutputFilenameNew StopLn pipe_env hsc_env location
 
@@ -282,18 +295,7 @@ runGenericAsPhase run_as extra_opts with_cpp pipe_env hsc_env location input_fn 
                     run_as
                        logger dflags
                        (all_includes
-                       -- See Note [-fPIC for assembler]
-                       ++ map GHC.SysTools.Option pic_c_flags
-                       -- See Note [Produce big objects on Windows]
-                       ++ [ GHC.SysTools.Option "-Wa,-mbig-obj"
-                          | platformOS (targetPlatform dflags) == OSMinGW32
-                          , not $ target32Bit (targetPlatform dflags)
-                          ]
-
-                       -- See Note [-Wa,--no-type-check on wasm32]
-                       ++ [ GHC.SysTools.Option "-Wa,--no-type-check"
-                          | platformArch (targetPlatform dflags) == ArchWasm32]
-
+                       ++ asmPlatformOpts dflags
                        ++ [ GHC.SysTools.Option "-x"
                           , if with_cpp
                               then GHC.SysTools.Option "assembler-with-cpp"
@@ -504,7 +506,7 @@ runHscBackendPhase :: PipeEnv
                    -> HscSource
                    -> ModLocation
                    -> HscBackendAction
-                   -> IO ([FilePath], ModIface, HomeModLinkable, FilePath, Bool)
+                   -> IO ([FilePath], ModIface, HomeModLinkable, AsmOutput)
 runHscBackendPhase pipe_env hsc_env mod_name src_flavour location result = do
   let dflags = hsc_dflags hsc_env
       logger = hsc_logger hsc_env
@@ -518,7 +520,7 @@ runHscBackendPhase pipe_env hsc_env mod_name src_flavour location result = do
                 -- In Interpreter way, there is just no linkable for hs-boot files
                 -- and we don't want to write an empty `o-boot` file when we're not
                 -- supposed to be writing any .o files (#22669)
-                return ([], iface, emptyHomeModInfoLinkable, o_file, False)
+                return ([], iface, emptyHomeModInfoLinkable, AsmToFile o_file)
              | otherwise -> do
                  case src_flavour of
                    HsigFile -> do
@@ -538,7 +540,7 @@ runHscBackendPhase pipe_env hsc_env mod_name src_flavour location result = do
                  -- linkable (.o-boot) which we check for in `Iface/Recomp.hs` and
                  -- then will carry around the linkable if we're doing
                  -- recompilation.
-                 return ([], iface, emptyHomeModInfoLinkable, o_file, False)
+                 return ([], iface, emptyHomeModInfoLinkable, AsmToFile o_file)
       HscRecomp { hscs_guts = cgguts,
                   hscs_mod_location = mod_location,
                   hscs_partial_iface = partial_iface,
@@ -576,10 +578,9 @@ runHscBackendPhase pipe_env hsc_env mod_name src_flavour location result = do
 
                   else return emptyHomeModInfoLinkable
 
-              -- When asm was piped, the .o file is already produced;
-              -- return the .o path so T_As can be skipped.
-              let finalOutputFilename = if asm_piped then obj_fn else outputFilename
-              return (fos, final_iface, mlinkable, finalOutputFilename, asm_piped)
+              -- See Note [Piped assembly output] in GHC.Driver.CodeOutput
+              let asm_output = if asm_piped then AsmPiped obj_fn else AsmToFile outputFilename
+              return (fos, final_iface, mlinkable, asm_output)
 
            else
               -- In interpreted mode the regular codeGen backend is not run so we
@@ -588,7 +589,7 @@ runHscBackendPhase pipe_env hsc_env mod_name src_flavour location result = do
               final_iface <- mkFullIface hsc_env partial_iface Nothing Nothing NoStubs []
               hscMaybeWriteIface logger dflags True final_iface mb_old_iface_hash location
               bc <- generateAndWriteByteCodeLinkable hsc_env (mkCgInteractiveGuts cgguts) mod_location
-              return ([], final_iface, emptyHomeModInfoLinkable { homeMod_bytecode = Just bc } , panic "interpreter", False)
+              return ([], final_iface, emptyHomeModInfoLinkable { homeMod_bytecode = Just bc } , AsmToFile (panic "interpreter"))
 
 
 runUnlitPhase :: HscEnv -> FilePath -> FilePath -> IO FilePath

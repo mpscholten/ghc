@@ -1,4 +1,4 @@
-module GHC.Driver.Pipeline.Phases (TPhase(..), PhaseHook(..)) where
+module GHC.Driver.Pipeline.Phases (TPhase(..), PhaseHook(..), AsmOutput(..)) where
 
 import GHC.Prelude
 import GHC.Driver.Pipeline.Monad
@@ -18,6 +18,12 @@ import GHC.Driver.Phases
 import Language.Haskell.Syntax.Module.Name ( ModuleName )
 import GHC.Unit.Home.ModInfo
 
+-- | Result of assembly output from the backend phase.
+-- See Note [Piped assembly output] in GHC.Driver.CodeOutput
+data AsmOutput
+  = AsmToFile !FilePath   -- ^ .s file produced, needs T_As phase
+  | AsmPiped  !FilePath   -- ^ .o file already produced by piped assembly
+
 -- Typed Pipeline Phases
 -- MP: TODO: We need to refine the arguments to each of these phases so recompilation
 -- can be smarter. For example, rather than passing a whole HscEnv, just pass the options
@@ -35,7 +41,7 @@ data TPhase res where
               -> Messages GhcMessage
               -> Maybe Fingerprint
               -> TPhase HscBackendAction
-  T_HscBackend :: PipeEnv -> HscEnv -> ModuleName -> HscSource -> ModLocation -> HscBackendAction -> TPhase ([FilePath], ModIface, HomeModLinkable, FilePath, Bool)
+  T_HscBackend :: PipeEnv -> HscEnv -> ModuleName -> HscSource -> ModLocation -> HscBackendAction -> TPhase ([FilePath], ModIface, HomeModLinkable, AsmOutput)
   T_CmmCpp :: PipeEnv -> HscEnv -> FilePath -> TPhase FilePath
   T_Cmm :: PipeEnv -> HscEnv -> FilePath -> TPhase ([FilePath], FilePath)
   T_Cc :: Phase -> PipeEnv -> HscEnv -> Maybe ModLocation -> FilePath -> TPhase FilePath

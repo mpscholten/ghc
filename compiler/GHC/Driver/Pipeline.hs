@@ -902,10 +902,11 @@ hscGenBackendPipeline pipe_env hsc_env mod_sum result = do
   let mod_name = moduleName (ms_mod mod_sum)
       src_flavour = (ms_hsc_src mod_sum)
   let location = ms_location mod_sum
-  (fos, miface, mlinkable, o_file, asm_piped) <- use (T_HscBackend pipe_env hsc_env mod_name src_flavour location result)
-  final_fp <- if asm_piped
-    then return (Just o_file) -- .o already produced by piped asm, skip T_As
-    else hscPostBackendPipeline pipe_env hsc_env (ms_hsc_src mod_sum) (backend (hsc_dflags hsc_env)) (Just location) o_file
+  (fos, miface, mlinkable, asm_output) <- use (T_HscBackend pipe_env hsc_env mod_name src_flavour location result)
+  -- See Note [Piped assembly output] in GHC.Driver.CodeOutput
+  final_fp <- case asm_output of
+    AsmPiped o_file -> return (Just o_file) -- .o already produced by piped asm, skip T_As
+    AsmToFile o_file -> hscPostBackendPipeline pipe_env hsc_env (ms_hsc_src mod_sum) (backend (hsc_dflags hsc_env)) (Just location) o_file
   final_linkable <-
     safeCastHomeModLinkable <$> case final_fp of
       -- No object file produced, bytecode or NoBackend
