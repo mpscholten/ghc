@@ -886,6 +886,9 @@ data GeneralFlag
 
    | Opt_G_NoStateHack
    | Opt_G_NoOptCoercion
+
+   -- Pipe assembly to assembler
+   | Opt_PipeAsm
    deriving (Eq, Show, Enum)
 
 -- | The set of flags which affect optimisation for the purposes of

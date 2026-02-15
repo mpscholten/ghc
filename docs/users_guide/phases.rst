@@ -668,6 +668,25 @@ Options affecting code generation
         Note that this GHC release expects an LLVM version between |llvm-version-min|
         and |llvm-version-max|.
 
+.. ghc-flag:: -fpipe-asm
+    :shortdesc: Pipe assembly output directly to the assembler
+    :type: dynamic
+    :reverse: -fno-pipe-asm
+    :category: codegen
+
+    .. index::
+       single: pipe assembly to assembler
+
+    When using the :ref:`native code generator <native-code-gen>`, pipe the
+    generated assembly directly to the assembler process via a pipe instead
+    of writing a temporary ``.s`` file. This overlaps assembler execution
+    with code generation and avoids writing and reading back a temporary
+    file.
+
+    This flag is enabled by default. It is automatically disabled when
+    :ghc-flag:`-keep-s-file` is used, since there is no intermediate ``.s``
+    file to keep when piping.
+
 .. ghc-flag:: -fno-code
     :shortdesc: Omit code generation
     :type: dynamic

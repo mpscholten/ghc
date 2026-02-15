@@ -1955,9 +1955,11 @@ hscSimpleIface' mb_core_program tc_result summary = do
 
 -- | Compile to hard-code.
 hscGenHardCode :: HscEnv -> CgGuts -> ModLocation -> FilePath
-               -> IO (FilePath, Maybe FilePath, [(ForeignSrcLang, FilePath)], Maybe StgCgInfos, Maybe CmmCgInfos )
-                -- ^ @Just f@ <=> _stub.c is f
-hscGenHardCode hsc_env cgguts mod_loc output_filename = do
+               -> Maybe FilePath -- ^ Just objPath = pipe asm to this .o;
+                                 --   Nothing = write .s normally.
+                                 --   See Note [Piped assembly output] in GHC.Driver.CodeOutput
+               -> IO (FilePath, Maybe FilePath, [(ForeignSrcLang, FilePath)], Maybe StgCgInfos, Maybe CmmCgInfos)
+hscGenHardCode hsc_env cgguts mod_loc output_filename mb_pipe_obj_path = do
         let CgGuts{ cg_module   = this_mod,
                     cg_binds    = core_binds,
                     cg_ccs      = local_ccs
@@ -2136,6 +2138,7 @@ hscGenHardCode hsc_env cgguts mod_loc output_filename = do
                   <- {-# SCC "codeOutput" #-}
                     codeOutput logger tmpfs llvm_config dflags (hsc_units hsc_env) this_mod output_filename mod_loc
                     foreign_stubs foreign_files dependencies (initDUniqSupply 'n' 0) rawcmms1
+                    mb_pipe_obj_path
               return  ( output_filename, stub_c_exists, foreign_fps
                       , Just stg_cg_infos, Just cmm_cg_infos)
 
@@ -2318,7 +2321,7 @@ hscCompileCmmFile hsc_env original_filename filename output_filename = runHsc hs
               | otherwise     = NoStubs
         (_output_filename, (_stub_h_exists, stub_c_exists), _foreign_fps, _caf_infos)
           <- codeOutput logger tmpfs llvm_config dflags (hsc_units hsc_env) cmm_mod output_filename no_loc foreign_stubs [] S.empty
-             dus1 rawCmms
+             dus1 rawCmms Nothing
         return stub_c_exists
   where
     no_loc = OsPathModLocation

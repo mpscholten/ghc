@@ -258,3 +258,6 @@ test('T25364', normal, compile_and_run, [''])
 test('T26061', normal, compile_and_run, [''])
 test('T26537', normal, compile_and_run, ['-O2 -fregs-graph'])
 test('T24016', normal, compile_and_run, ['-O1 -fPIC'])
+
+test('PipeAsm', normal, compile_and_run, ['-fpipe-asm'])
+test('PipeAsmOff', normal, compile_and_run, ['-fno-pipe-asm'])
