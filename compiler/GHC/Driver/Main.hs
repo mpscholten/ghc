@@ -118,7 +118,6 @@ import GHC.Driver.Errors
 import GHC.Driver.Messager
 import GHC.Driver.Errors.Types
 import GHC.Driver.CodeOutput
-import GHC.Driver.Phases (StopPhase(..))
 import GHC.Driver.Config.Cmm.Parser (initCmmParserConfig)
 import GHC.Driver.Config.Core.Opt.Simplify ( initSimplifyExprOpts )
 import GHC.Driver.Config.Core.Lint ( endPassHscEnvIO )
@@ -1956,11 +1955,11 @@ hscSimpleIface' mb_core_program tc_result summary = do
 
 -- | Compile to hard-code.
 hscGenHardCode :: HscEnv -> CgGuts -> ModLocation -> FilePath
-               -> Maybe FilePath -- ^ .o output path for piped asm
-               -> StopPhase      -- ^ Stop phase from pipeline
+               -> Maybe Handle -- ^ Assembler stdin handle for piped asm.
+                               -- See Note [Piped assembly output] in GHC.Driver.CodeOutput
                -> IO (FilePath, Maybe FilePath, [(ForeignSrcLang, FilePath)], Maybe StgCgInfos, Maybe CmmCgInfos, Bool )
                 -- ^ @Just f@ <=> _stub.c is f; Bool = asm was piped
-hscGenHardCode hsc_env cgguts mod_loc output_filename mb_obj_path stop_phase = do
+hscGenHardCode hsc_env cgguts mod_loc output_filename mb_asm_handle = do
         let CgGuts{ cg_module   = this_mod,
                     cg_binds    = core_binds,
                     cg_ccs      = local_ccs
@@ -2047,6 +2046,7 @@ hscGenHardCode hsc_env cgguts mod_loc output_filename mb_obj_path stop_phase = d
           tmpfs  = hsc_tmpfs hsc_env
           llvm_config = hsc_llvm_config hsc_env
           profile = targetProfile dflags
+          platform = targetPlatform dflags
 
         -------------------
         -- PREPARE FOR CODE GENERATION
@@ -2074,7 +2074,6 @@ hscGenHardCode hsc_env cgguts mod_loc output_filename mb_obj_path stop_phase = d
 
         let cost_centre_info =
               (late_local_ccs ++ caf_ccs, caf_cc_stacks)
-            platform = targetPlatform dflags
             prof_init
               | sccProfilingEnabled dflags = profilingInitCode platform this_mod cost_centre_info
               | otherwise = mempty
@@ -2139,7 +2138,7 @@ hscGenHardCode hsc_env cgguts mod_loc output_filename mb_obj_path stop_phase = d
                   <- {-# SCC "codeOutput" #-}
                     codeOutput logger tmpfs llvm_config dflags (hsc_units hsc_env) this_mod output_filename mod_loc
                     foreign_stubs foreign_files dependencies (initDUniqSupply 'n' 0) rawcmms1
-                    mb_obj_path stop_phase (Just hsc_env)
+                    mb_asm_handle
               return  ( output_filename, stub_c_exists, foreign_fps
                       , Just stg_cg_infos, Just cmm_cg_infos, asm_piped)
 
@@ -2322,7 +2321,7 @@ hscCompileCmmFile hsc_env original_filename filename output_filename = runHsc hs
               | otherwise     = NoStubs
         (_output_filename, (_stub_h_exists, stub_c_exists), _foreign_fps, _caf_infos, _asm_piped)
           <- codeOutput logger tmpfs llvm_config dflags (hsc_units hsc_env) cmm_mod output_filename no_loc foreign_stubs [] S.empty
-             dus1 rawCmms Nothing NoStop (Just hsc_env)
+             dus1 rawCmms Nothing
         return stub_c_exists
   where
     no_loc = OsPathModLocation

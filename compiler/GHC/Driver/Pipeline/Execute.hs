@@ -251,6 +251,19 @@ runLlvmOptPhase pipe_env hsc_env input_fn = do
     return output_fn
 
 
+-- | Check whether piped assembly is possible.
+-- See Note [Piped assembly output] in GHC.Driver.CodeOutput
+canPipeAsm :: HscEnv -> DynFlags -> StopPhase -> Bool
+canPipeAsm hsc_env dflags stop_phase =
+    gopt Opt_PipeAsm dflags
+    && not (gopt Opt_KeepSFiles dflags)
+    && not is_stop_as
+    && isNothing (runPhaseHook (hsc_hooks hsc_env))
+  where
+    is_stop_as = case stop_phase of
+      StopAs -> True
+      _      -> False
+
 -- | Common platform-specific assembler flags shared between file-based
 -- and piped assembly paths.
 -- See Note [-fPIC for assembler], Note [Produce big objects on Windows],
@@ -554,9 +567,23 @@ runHscBackendPhase pipe_env hsc_env mod_name src_flavour location result = do
               -- Compute the .o path for piped asm
               obj_fn <- phaseOutputFilenameNew StopLn pipe_env hsc_env (Just location)
               createDirectoryIfMissing True (takeDirectory obj_fn)
+
+              -- See Note [Piped assembly output] in GHC.Driver.CodeOutput
+              let do_pipe_asm = canPipeAsm hsc_env dflags (stop_phase pipe_env)
+
+              -- Start assembler BEFORE codegen to overlap startup with
+              -- CorePrep, CoreToStg, StgToCmm, and cmmToRawCmm.
               (outputFilename, mStub, foreign_files, stg_infos, cg_infos, asm_piped) <-
-                hscGenHardCode hsc_env cgguts mod_location output_fn
-                  (Just obj_fn) (stop_phase pipe_env)
+                if do_pipe_asm
+                then withAtomicRename obj_fn $ \tempObjPath -> do
+                  let as_args = asmPlatformOpts dflags
+                                ++ [ Option "-x", Option "assembler"
+                                   , Option "-c", Option "-"
+                                   , Option "-o", FileOption "" tempObjPath ]
+                  withAsPiped logger dflags as_args $ \stdinH ->
+                    hscGenHardCode hsc_env cgguts mod_location output_fn (Just stdinH)
+                else
+                  hscGenHardCode hsc_env cgguts mod_location output_fn Nothing
 
               stub_o <- mapM (compileStub hsc_env) mStub
               foreign_os <-
