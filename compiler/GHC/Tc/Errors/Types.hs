@@ -6962,22 +6962,14 @@ data THReifyError
   deriving Generic
 
 data AddTopDeclsError
-  = {-| InvalidTopDecl is a Template Haskell error occurring when one of the 'Dec's passed to
-      'addTopDecls' is not a function, value, annotation, or foreign import declaration.
-
-       Example(s):
-
-       Test cases:
-    -}
-    InvalidTopDecl !(HsDecl GhcPs)
-    {-| UnexpectedDeclarationSplice is an error that occurs when a Template Haskell
+  = {-| UnexpectedDeclarationSplice is an error that occurs when a Template Haskell
         splice appears inside top-level declarations added with 'addTopDecls'.
 
         Example(s): none
 
         Test cases: none
   -}
-  | AddTopDeclsUnexpectedDeclarationSplice
+    AddTopDeclsUnexpectedDeclarationSplice
 
   | AddTopDeclsRunSpliceFailure !RunSpliceFailReason
   deriving Generic
