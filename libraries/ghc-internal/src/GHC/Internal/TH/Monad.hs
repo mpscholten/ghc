@@ -29,7 +29,7 @@ import Data.Data hiding (Fixity(..))
 import Data.IORef
 import System.IO.Unsafe (unsafePerformIO)
 import Control.Monad.IO.Class (MonadIO (..))
-import System.IO (FilePath, hPutStrLn, stderr)
+import System.IO (hPutStrLn, stderr)
 import qualified Data.Kind as Kind (Type)
 import GHC.Types (TYPE, RuntimeRep(..))
 #else
@@ -851,8 +851,20 @@ addDependentFile fp = Q (qAddDependentFile fp)
 addTempFile :: String -> Q FilePath
 addTempFile suffix = Q (qAddTempFile suffix)
 
--- | Add additional top-level declarations. The added declarations will be type
--- checked along with the current declaration group.
+-- | Add additional top-level declarations. The added declarations are renamed
+-- and type checked along with the current declaration group.
+--
+-- Names introduced by these declarations are available to the splice result
+-- through exact 'Name's. For example, a splice can use 'newName' to build a
+-- @data@ declaration with 'addTopDecls' and then construct values of that type
+-- in the expression it returns.
+--
+-- These declarations also contribute names to later declaration groups.
+-- However, they do not bring ordinary source names into scope later in the
+-- same declaration group, because that group has already been renamed. This
+-- means that later source code in the same group still cannot refer to
+-- generated names directly without an intervening declaration-group split
+-- such as @$(pure [])@.
 addTopDecls :: [Dec] -> Q ()
 addTopDecls ds = Q (qAddTopDecls ds)
 

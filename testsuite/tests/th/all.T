@@ -462,6 +462,22 @@ test('T14471', normal, compile, [''])
 test('TH_rebindableAdo', normal, compile, [''])
 test('T14627', normal, compile_fail, [''])
 test('TH_invalid_add_top_decl', normal, compile_fail, [''])
+test('TH_addTopDecls_record_dot',
+     extra_files(['TH_addTopDecls_ProjectRows.hs']),
+     compile_and_run,
+     [''])
+test('TH_addTopDecls_record_dot_do',
+     extra_files(['TH_addTopDecls_ProjectRows.hs']),
+     compile_and_run,
+     [''])
+test('TH_addTopDecls_newtype_type', normal, compile_and_run, [''])
+test('TH_addTopDecls_class_method', normal, compile_and_run, [''])
+test('TH_addTopDecls_inst_data_family', normal, compile_and_run, [''])
+test('TH_addTopDecls_same_group_name_fail',
+     [extra_files(['TH_addTopDecls_ProjectRows.hs']),
+      grep_errmsg(r'Variable not in scope: name')],
+     multimod_compile_fail,
+     ['TH_addTopDecls_same_group_name_fail', ''])
 test('TH_EmptyLamCases', normal, compile_fail, [''])
 test('TH_EmptyMultiIf', normal, compile_fail, [''])
 test('T15550', normal, compile, ['-v0 -ddump-splices -dsuppress-uniques'])
