@@ -961,7 +961,6 @@ type family GhcDiagnosticCode c = n | n -> c where
   GhcDiagnosticCode "TypedTHWithPolyType"                           = 94642
   GhcDiagnosticCode "SplicePolymorphicLocalVar"                     = 06568
   GhcDiagnosticCode "SpliceThrewException"                          = 87897
-  GhcDiagnosticCode "InvalidTopDecl"                                = 52886
   GhcDiagnosticCode "NonExactName"                                  = 77923
   GhcDiagnosticCode "AddInvalidCorePlugin"                          = 86463
   GhcDiagnosticCode "AddDocToNonLocalDefn"                          = 67760

@@ -7450,10 +7450,6 @@ pprSpliceFailReason = \case
 
 pprAddTopDeclsError :: AddTopDeclsError -> DecoratedSDoc
 pprAddTopDeclsError = \case
-  InvalidTopDecl _decl ->
-    mkSimpleDecorated $
-      sep [ text "Only function, value, annotation, and foreign import declarations"
-          , text "may be added with" <+> quotes (text "addTopDecls") <> dot ]
   AddTopDeclsUnexpectedDeclarationSplice {} ->
     mkSimpleDecorated $
       text "Declaration splices are not permitted" <+>
@@ -7537,8 +7533,6 @@ spliceFailedReason = \case
 
 addTopDeclsErrorReason :: AddTopDeclsError -> DiagnosticReason
 addTopDeclsErrorReason = \case
-  InvalidTopDecl {}
-    -> ErrorWithoutFlag
   AddTopDeclsUnexpectedDeclarationSplice {}
     -> ErrorWithoutFlag
   AddTopDeclsRunSpliceFailure {}
@@ -7597,8 +7591,6 @@ spliceFailedHints = \case
 
 addTopDeclsErrorHints :: AddTopDeclsError -> [GhcHint]
 addTopDeclsErrorHints = \case
-  InvalidTopDecl {}
-    -> noHints
   AddTopDeclsUnexpectedDeclarationSplice {}
     -> noHints
   AddTopDeclsRunSpliceFailure {}
