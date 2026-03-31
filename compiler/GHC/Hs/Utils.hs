@@ -94,7 +94,7 @@ module GHC.Hs.Utils(
   CollectPass(..), CollectFlag(..),
 
   TyDeclBinders(..), LConsWithFields(..),
-  hsLTyClDeclBinders, hsTyClForeignBinders,
+  hsLTopDeclBinders, hsLTyClDeclBinders, hsTyClForeignBinders,
   hsPatSynSelectors, getPatSynBinds,
   hsForeignDeclsBinders, hsGroupBinders, hsDataFamInstBinders,
 
@@ -1434,6 +1434,24 @@ hsTyClForeignBinders tycl_decls foreign_decls
   where
     getSelectorNames :: ([LocatedA Name], [LFieldOcc GhcRn]) -> [Name]
     getSelectorNames (ns, fs) = map unLoc ns ++ map (unLoc . foLabel . unLoc) fs
+
+-------------------
+
+hsLTopDeclBinders :: LHsDecl GhcPs -> ([RdrName], [FieldOcc GhcPs])
+hsLTopDeclBinders (L _ (ValD _ binds))
+  = (collectHsBindBinders CollNoDictBinders binds, [])
+hsLTopDeclBinders (L decl_loc (TyClD _ tycl_decl))
+  = (map unLoc names, map unLoc fields)
+  where
+    (names, fields) = tyDeclBinders (hsLTyClDeclBinders (L decl_loc tycl_decl))
+hsLTopDeclBinders (L decl_loc (InstD _ inst_decl))
+  = (map unLoc names, map unLoc fields)
+  where
+    (names, fields) = hsLInstDeclBinders (L decl_loc inst_decl)
+hsLTopDeclBinders (L decl_loc (ForD _ foreign_decl))
+  = (map unLoc (hsForeignDeclsBinders [L decl_loc foreign_decl]), [])
+hsLTopDeclBinders _
+  = ([], [])
 
 -------------------
 

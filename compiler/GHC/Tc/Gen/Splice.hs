@@ -1538,21 +1538,14 @@ instance TH.Quasi TcM where
               Left exn -> failWithTc $ TcRnTHError $ AddTopDeclsError $
                 AddTopDeclsRunSpliceFailure exn
               Right ds -> return ds
-      mapM_ (checkTopDecl . unLoc) ds
+      -- See Note [addTopDecls exact binders].
+      mapM_ (bindNamesAndFields . hsLTopDeclBinders) ds
       th_topdecls_var <- fmap tcg_th_topdecls getGblEnv
       updTcRef th_topdecls_var (\topds -> ds ++ topds)
     where
-      checkTopDecl :: HsDecl GhcPs -> TcM ()
-      checkTopDecl (ValD _ binds)
-        = mapM_ bindName (collectHsBindBinders CollNoDictBinders binds)
-      checkTopDecl (SigD _ _)
-        = return ()
-      checkTopDecl (AnnD _ _)
-        = return ()
-      checkTopDecl (ForD _ (ForeignImport { fd_name = L _ name }))
-        = bindName name
-      checkTopDecl d
-        = addErr $ TcRnTHError $ AddTopDeclsError $ InvalidTopDecl d
+      bindNamesAndFields (names, fields)
+        = do mapM_ bindName names
+             mapM_ (bindName . fieldOccRdrName) fields
 
       bindName :: RdrName -> TcM ()
       bindName (Exact n)
@@ -1561,6 +1554,22 @@ instance TH.Quasi TcM where
              }
 
       bindName name = addErr $ TcRnTHError $ THNameError $ NonExactName name
+
+{-
+Note [addTopDecls exact binders]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Declarations queued with `addTopDecls` are later renamed and typechecked by the
+ordinary declaration pipeline. However, the splice result itself may mention
+the generated names via exact TH `Name`s before that happens, so we record the
+exact binders in `tcg_th_topnames` here.
+
+We harvest the binders introduced by each top-level declaration form that can
+make new names visible before the queued declarations are processed: value
+bindings, type/class declarations, instance declarations with associated data
+constructors or selectors, and foreign imports. Non-binding declaration forms
+simply fall through here; their validity is checked later by `rnTopSrcDecls`
+and `tcTopSrcDecls` when the queued declarations are processed.
+-}
 
   qAddForeignFilePath lang fp = do
     var <- fmap tcg_th_foreign_files getGblEnv
