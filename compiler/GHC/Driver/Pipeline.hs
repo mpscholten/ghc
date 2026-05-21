@@ -92,10 +92,11 @@ import qualified GHC.LanguageExtensions as LangExt
 import GHC.Data.FastString     ( mkFastString )
 import GHC.Data.StringBuffer   ( hPutStringBuffer )
 import GHC.Data.Maybe          ( expectJust )
+import qualified GHC.Data.Maybe as M
 import qualified System.OsPath as SysOsPath
 
 import GHC.Iface.Make          ( mkFullIface )
-import GHC.Iface.Load          ( getGhcPrimIface )
+import GHC.Iface.Load          ( getGhcPrimIface, findAndReadIface )
 import GHC.Runtime.Loader      ( initializePlugins )
 
 
@@ -117,9 +118,11 @@ import GHC.Unit.Module.Status
 import GHC.Unit.Home.ModInfo
 import GHC.Unit.Home.PackageTable
 
+
 import System.Directory
 import System.FilePath
 import System.IO
+import Control.Concurrent (threadDelay)
 import Control.Monad
 import qualified Control.Monad.Catch as MC (handle)
 import Data.Maybe
@@ -233,14 +236,18 @@ compileOne' :: Maybe Messager
             -> IO HomeModInfo   -- ^ the complete HomeModInfo, if successful
 
 compileOne' mHscMessage hsc_env0 summary mod_index nmods mb_old_iface mb_old_linkable =
-  -- Delegate to compileOneWithEarlySignal with no callback
+  -- Delegate to compileOneWithEarlySignal with no callbacks.
   compileOneWithEarlySignal mHscMessage hsc_env0 summary mod_index nmods
                             mb_old_iface mb_old_linkable Nothing
+                            (Just (waitForBackendIfacesOnDisk hsc_env0))
 
 -- | Like 'compileOne'' but with a frontend interface signal callback.
 -- The callback is invoked at the frontend/backend boundary
 -- (after `T_HscPostTc`, before backend codegen),
 -- allowing dependent modules to start `T_Hsc`/`T_HscPostTc` earlier.
+-- A second optional callback can wait for full dependency results right before
+-- backend codegen starts, for the subset of home modules actually needed by
+-- code generation.
 -- See Note [Pipelined compilation] in GHC.Driver.Make
 compileOneWithEarlySignal
             :: Maybe Messager
@@ -251,10 +258,11 @@ compileOneWithEarlySignal
             -> Maybe ModIface  -- ^ old interface, if we have one
             -> HomeModLinkable
             -> Maybe (HomeModInfo -> IO ())  -- ^ callback for frontend interface signal
+            -> Maybe ([Module] -> IO [(Module, HomeModInfo)])   -- ^ callback to wait for full deps before backend codegen
             -> IO HomeModInfo   -- ^ the complete HomeModInfo, if successful
 
 compileOneWithEarlySignal mHscMessage
-            hsc_env0 summary mod_index nmods mb_old_iface mb_old_linkable mb_frontend_signal
+            hsc_env0 summary mod_index nmods mb_old_iface mb_old_linkable mb_frontend_signal mb_pre_iface_finalize_wait
  = do
 
    debugTraceMsg logger 2 (text "compile: input file" <+> text input_fnpp)
@@ -271,7 +279,7 @@ compileOneWithEarlySignal mHscMessage
    let pipe_env = mkPipeEnv NoStop input_fn Nothing pipelineOutput
    status <- hscRecompStatus mHscMessage plugin_hsc_env upd_summary
                 mb_old_iface mb_old_linkable (mod_index, nmods)
-   let pipeline = hscPipelineWithEarlySignal pipe_env (setDumpPrefix pipe_env plugin_hsc_env, upd_summary, status) mb_frontend_signal
+   let pipeline = hscPipelineWithEarlySignal pipe_env (setDumpPrefix pipe_env plugin_hsc_env, upd_summary, status) mb_frontend_signal mb_pre_iface_finalize_wait
    (iface, linkable, mb_frontend_details) <- runPipeline (hsc_hooks plugin_hsc_env) pipeline
    -- See Note [ModDetails and --make mode]
    -- Reuse frontend details if provided by hscPipelineWithEarlySignal.
@@ -888,13 +896,18 @@ fullPipeline pipe_env hsc_env pp_fn src_flavour = do
 -- | Everything after preprocess
 hscPipeline :: P m => PipeEnv -> (HscEnv, ModSummary, HscRecompStatus) -> m (ModIface, RecompLinkables)
 hscPipeline pipe_env input = do
-  (iface, linkables, _mb_details) <- hscPipelineWithEarlySignal pipe_env input Nothing
+  let (hsc_env, _, _) = input
+  (iface, linkables, _mb_details) <-
+    hscPipelineWithEarlySignal pipe_env input Nothing (Just (waitForBackendIfacesOnDisk hsc_env))
   return (iface, linkables)
 
 -- | Like 'hscPipeline' but with an optional callback that's invoked after
 -- frontend completes (after `T_HscPostTc`, before backend codegen). This allows signaling that the
 -- frontend interface is ready, enabling dependent modules to start
 -- `T_Hsc`/`T_HscPostTc` earlier.
+-- A second optional callback can wait for full dependency results right before
+-- backend codegen starts, for the subset of home modules actually needed by
+-- code generation.
 -- See Note [Pipelined compilation] in GHC.Driver.Make
 --
 -- Returns the frontend ModDetails if one was computed during signaling, allowing
@@ -903,8 +916,9 @@ hscPipelineWithEarlySignal :: P m
   => PipeEnv
   -> (HscEnv, ModSummary, HscRecompStatus)
   -> Maybe (HomeModInfo -> IO ())  -- ^ Optional callback for frontend interface signaling
+  -> Maybe ([Module] -> IO [(Module, HomeModInfo)])  -- ^ Optional callback to wait for full deps before backend codegen
   -> m (ModIface, RecompLinkables, Maybe ModDetails)
-hscPipelineWithEarlySignal pipe_env (hsc_env_with_plugins, mod_sum, hsc_recomp_status) mb_frontend_signal = do
+hscPipelineWithEarlySignal pipe_env (hsc_env_with_plugins, mod_sum, hsc_recomp_status) mb_frontend_signal mb_pre_iface_finalize_wait = do
   case hsc_recomp_status of
     HscUpToDate iface mb_linkable -> do
       -- Module is up to date, signal the existing interface with proper ModDetails
@@ -922,31 +936,40 @@ hscPipelineWithEarlySignal pipe_env (hsc_env_with_plugins, mod_sum, hsc_recomp_s
       hscBackendAction0 <- use (T_HscPostTc hsc_env_with_plugins mod_sum tc_result warnings mb_old_hash)
       -- Signal frontend interface is ready at the frontend/backend boundary
       -- Create a frontend HomeModInfo with proper ModDetails for dependents to use
-      -- We return the frontend details so caller can reuse them instead of calling
-      -- initModDetails again.
-      mb_frontend_details <- case mb_frontend_signal of
-        Just signal -> liftIO $ do
-          case hscBackendAction0 of
-            HscRecomp { hscs_partial_iface = partial_iface } -> do
-              -- Create the frontend interface at the T_HscPostTc boundary.
-              frontend_iface <- addFingerprints hsc_env_with_plugins partial_iface
-              -- Compute ModDetails so dependents can look up types
-              frontend_details <- initModDetails hsc_env_with_plugins frontend_iface
-              signal (HomeModInfo frontend_iface frontend_details emptyHomeModInfoLinkable)
-              return (Just frontend_details)
-            HscUpdate iface -> do
-              details <- initModDetails hsc_env_with_plugins iface
-              signal (HomeModInfo iface details emptyHomeModInfoLinkable)
-              return (Just details)
-        Nothing -> return Nothing
-      (iface, linkables) <- hscBackendPipeline pipe_env hsc_env_with_plugins mod_sum hscBackendAction0
+      (hscBackendAction, mb_frontend_details) <- liftIO $
+        case hscBackendAction0 of
+          recomp@HscRecomp { hscs_partial_iface = partial_iface } -> do
+            frontend_iface <- addFingerprints hsc_env_with_plugins Nothing partial_iface
+            let recomp' = recomp { hscs_frontend_hashes = Just (mi_frontend_hashes frontend_iface) }
+            case mb_frontend_signal of
+              Just signal -> do
+                frontend_details <- initModDetails hsc_env_with_plugins frontend_iface
+                signal (HomeModInfo frontend_iface frontend_details emptyHomeModInfoLinkable)
+                return (recomp', Nothing)
+              Nothing ->
+                return (recomp', Nothing)
+          HscUpdate iface -> do
+            mb_details <- case mb_frontend_signal of
+              Just signal -> do
+                details <- initModDetails hsc_env_with_plugins iface
+                signal (HomeModInfo iface details emptyHomeModInfoLinkable)
+                return (Just details)
+              Nothing -> return Nothing
+            return (hscBackendAction0, mb_details)
+      (iface, linkables) <- hscBackendPipeline pipe_env hsc_env_with_plugins mod_sum hscBackendAction mb_pre_iface_finalize_wait
       return (iface, linkables, mb_frontend_details)
 
-hscBackendPipeline :: P m => PipeEnv -> HscEnv -> ModSummary -> HscBackendAction -> m (ModIface, RecompLinkables)
-hscBackendPipeline pipe_env hsc_env mod_sum result =
+hscBackendPipeline :: P m
+  => PipeEnv
+  -> HscEnv
+  -> ModSummary
+  -> HscBackendAction
+  -> Maybe ([Module] -> IO [(Module, HomeModInfo)]) -- wait for full deps before backend codegen
+  -> m (ModIface, RecompLinkables)
+hscBackendPipeline pipe_env hsc_env mod_sum result mb_pre_iface_finalize_wait =
   if backendGeneratesCode (backend (hsc_dflags hsc_env)) then
     do
-      res <- hscGenBackendPipeline pipe_env hsc_env mod_sum result
+      res <- hscGenBackendPipeline pipe_env hsc_env mod_sum result mb_pre_iface_finalize_wait
       -- Only run dynamic-too if the backend generates object files
       -- See Note [Writing interface files]
       -- If we are writing a simple interface (not . backendWritesFiles), then
@@ -957,24 +980,26 @@ hscBackendPipeline pipe_env hsc_env mod_sum result =
       -- all the work has already been done in the first pipeline.
       when (gopt Opt_BuildDynamicToo (hsc_dflags hsc_env) && backendWritesFiles (backend (hsc_dflags hsc_env)) ) $ do
           let dflags' = setDynamicNow (hsc_dflags hsc_env) -- set "dynamicNow"
-          () <$ hscGenBackendPipeline pipe_env (hscSetFlags dflags' hsc_env) mod_sum result
+          () <$ hscGenBackendPipeline pipe_env (hscSetFlags dflags' hsc_env) mod_sum result mb_pre_iface_finalize_wait
       return res
   else
     case result of
       HscUpdate iface ->  return (iface, emptyRecompLinkables)
-      HscRecomp {} -> (,) <$> liftIO (mkFullIface hsc_env (hscs_partial_iface result) Nothing Nothing NoStubs []) <*> pure emptyRecompLinkables
+      HscRecomp { hscs_frontend_hashes = mb_frontend_hashes } ->
+        (,) <$> liftIO (mkFullIface hsc_env mb_frontend_hashes (hscs_partial_iface result) Nothing Nothing NoStubs []) <*> pure emptyRecompLinkables
 
 hscGenBackendPipeline :: P m
   => PipeEnv
   -> HscEnv
   -> ModSummary
   -> HscBackendAction
+  -> Maybe ([Module] -> IO [(Module, HomeModInfo)]) -- wait for full deps before backend codegen
   -> m (ModIface, RecompLinkables)
-hscGenBackendPipeline pipe_env hsc_env mod_sum result = do
+hscGenBackendPipeline pipe_env hsc_env mod_sum result mb_pre_iface_finalize_wait = do
   let mod_name = moduleName (ms_mod mod_sum)
       src_flavour = (ms_hsc_src mod_sum)
   let location = ms_location mod_sum
-  (fos, miface, mlinkable, o_file) <- use (T_HscBackend pipe_env hsc_env mod_name src_flavour location result)
+  (fos, miface, mlinkable, o_file) <- use (T_HscBackend pipe_env hsc_env mod_name src_flavour location result mb_pre_iface_finalize_wait)
   final_fp <- hscPostBackendPipeline pipe_env hsc_env (ms_hsc_src mod_sum) (backend (hsc_dflags hsc_env)) (Just location) o_file
   final_linkable <-
     safeCastHomeModLinkable <$> case final_fp of
@@ -993,6 +1018,38 @@ hscGenBackendPipeline pipe_env hsc_env mod_sum result = do
         | ms_mod mod_sum == gHC_PRIM = getGhcPrimIface (hsc_hooks hsc_env)
         | otherwise                  = miface
   return (miface_final, final_linkable)
+
+waitForBackendIfacesOnDisk :: HscEnv -> [Module] -> IO [(Module, HomeModInfo)]
+waitForBackendIfacesOnDisk hsc_env mods =
+  forM (Set.toList (Set.fromList mods)) $ \mod -> do
+    iface <- waitForBackendIfaceOnDisk hsc_env mod
+    details <- initModDetails hsc_env iface
+    pure (mod, HomeModInfo iface details emptyHomeModInfoLinkable)
+
+waitForBackendIfaceOnDisk :: HscEnv -> Module -> IO ModIface
+waitForBackendIfaceOnDisk hsc_env mod = do
+  let installed_mod = mkModule (moduleUnitId mod) (moduleName mod)
+  waitForBackendIfaceFile hsc_env installed_mod
+  findAndReadIface hsc_env (text "waitForBackendIfacesOnDisk") installed_mod mod NotBoot >>= \case
+    M.Succeeded (iface, _) -> pure iface
+    M.Failed _ ->
+      throwGhcExceptionIO $
+        ProgramError $
+          "waitForBackendIfacesOnDisk: failed to read backend interface"
+
+waitForBackendIfaceFile :: HscEnv -> InstalledModule -> IO ()
+waitForBackendIfaceFile hsc_env installed_mod =
+  findExactModule hsc_env installed_mod NotBoot >>= \case
+    InstalledFound loc -> waitForHi 600 (ml_hi_file loc)
+    _ -> pure ()
+  where
+    waitForHi :: Int -> FilePath -> IO ()
+    waitForHi 0 _ = pure ()
+    waitForHi retries hi_path = do
+      exists <- doesFileExist hi_path
+      unless exists $ do
+        threadDelay 100000
+        waitForHi (retries - 1) hi_path
 
 asPipeline :: P m => Bool -> PipeEnv -> HscEnv -> Maybe ModLocation -> FilePath -> m (Maybe ObjFile)
 asPipeline use_cpp pipe_env hsc_env location input_fn =

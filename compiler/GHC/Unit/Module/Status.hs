@@ -46,6 +46,9 @@ data HscBackendAction
         , hscs_partial_iface  :: !PartialModIface
           -- ^ Interface produced by frontend (`T_HscPostTc`), before
           -- backend codegen patches in CAF/LF/tag info.
+        , hscs_frontend_hashes :: !(Maybe IfaceFrontendHashes)
+          -- ^ Frontend-only contract computed at the `T_HscPostTc` boundary
+          -- and embedded unchanged in the final interface.
         , hscs_old_iface_hash :: !(Maybe Fingerprint)
           -- ^ Old interface hash for this compilation, if an old interface file
           -- exists. Pass to `hscMaybeWriteIface` when writing the interface to
@@ -69,7 +72,7 @@ instance Outputable HscRecompStatus where
 
 instance Outputable HscBackendAction where
   ppr (HscUpdate mi) = text "Update:" <+> (ppr (mi_module mi))
-  ppr (HscRecomp _ ml _mi _mf) = text "Recomp:" <+> ppr ml
+  ppr (HscRecomp _ ml _mi _fh _mf) = text "Recomp:" <+> ppr ml
 
 instance Outputable RecompLinkables where
   ppr (RecompLinkables l1 l2) = ppr l1 $$ ppr l2

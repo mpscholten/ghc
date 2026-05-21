@@ -308,8 +308,8 @@ mk_mod_usage_info uc home_unit home_unit_ids this_mod direct_imports imp_decls u
                       usg_safe     = imp_safe }
       where
         finsts_mod = mi_finsts iface
-        hash_env   = mi_hash_fn iface
-        mod_hash   = mi_mod_hash iface
+        hash_env   = mi_frontend_hash_fn iface
+        mod_hash   = mi_frontend_mod_hash iface
         imported_exports
           = if not depend_on_exports
             then Nothing
@@ -317,9 +317,9 @@ mk_mod_usage_info uc home_unit home_unit_ids this_mod direct_imports imp_decls u
               Just $
                 HomeModImport
                  { hmiu_orphanLikeHash
-                     = mi_orphan_like_hash iface
+                     = mi_frontend_orphan_like_hash iface
                  , hmiu_importedAvails
-                     = moduleImportedAvails mod (mi_export_avails_hash iface) imp_decls
+                     = moduleImportedAvails mod (mi_frontend_export_avails_hash iface) imp_decls
                  }
 
         by_is_safe (ImportedByUser imv) = imv_is_safe imv

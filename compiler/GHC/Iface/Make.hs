@@ -31,8 +31,8 @@ import GHC.Tc.Utils.Monad
 import GHC.Iface.Warnings
 import GHC.Iface.Decl
 import GHC.Iface.Syntax
+import GHC.Iface.Load (flagsToIfCompression, pprModIface)
 import GHC.Iface.Recomp
-import GHC.Iface.Load
 import GHC.Iface.Ext.Fields
 
 import GHC.CoreToIface
@@ -71,8 +71,8 @@ import GHC.Types.Name.Cache
 import GHC.Utils.Outputable
 import GHC.Utils.Panic
 import GHC.Utils.Logger
-import GHC.Utils.Binary
 import GHC.Iface.Binary
+import GHC.Utils.Binary
 
 import GHC.Data.FastString
 import GHC.Data.Maybe
@@ -133,8 +133,8 @@ mkPartialIface hsc_env core_prog mod_details mod_summary import_decls
 -- CmmCgInfos is not available when not generating code (-fno-code), or when not
 -- generating interface pragmas (-fomit-interface-pragmas). See also
 -- Note [Conveying CAF-info and LFInfo between modules] in GHC.StgToCmm.Types.
-mkFullIface :: HscEnv -> PartialModIface -> Maybe StgCgInfos -> Maybe CmmCgInfos -> ForeignStubs -> [(ForeignSrcLang, FilePath)] -> IO ModIface
-mkFullIface hsc_env partial_iface mb_stg_infos mb_cmm_infos stubs foreign_files = do
+mkFullIface :: HscEnv -> Maybe IfaceFrontendHashes -> PartialModIface -> Maybe StgCgInfos -> Maybe CmmCgInfos -> ForeignStubs -> [(ForeignSrcLang, FilePath)] -> IO ModIface
+mkFullIface hsc_env mb_frontend_hashes partial_iface mb_stg_infos mb_cmm_infos stubs foreign_files = do
     let decls
           | gopt Opt_OmitInterfacePragmas (hsc_dflags hsc_env)
           = mi_decls partial_iface
@@ -148,7 +148,8 @@ mkFullIface hsc_env partial_iface mb_stg_infos mb_cmm_infos stubs foreign_files 
 
     full_iface <-
       {-# SCC "addFingerprints" #-}
-      addFingerprints hsc_env $ set_mi_simplified_core mi_simplified_core $ set_mi_decls decls partial_iface
+      addFingerprints hsc_env mb_frontend_hashes $
+        set_mi_simplified_core mi_simplified_core $ set_mi_decls decls partial_iface
 
     -- Debug printing
     let unit_state = hsc_units hsc_env
@@ -258,7 +259,7 @@ mkIfaceTc hsc_env safe_mode mod_details mod_summary mb_program
                    docs
                    mod_details
 
-          mkFullIface hsc_env partial_iface Nothing Nothing NoStubs []
+          mkFullIface hsc_env Nothing partial_iface Nothing Nothing NoStubs []
 
 mkRecompUsageInfo :: HscEnv -> TcGblEnv -> IO (Maybe [Usage])
 mkRecompUsageInfo hsc_env tc_result = do

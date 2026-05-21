@@ -11,6 +11,7 @@ import GHC.Tc.Types ( FrontendResult )
 import GHC.Types.Error
 import GHC.Driver.Errors.Types
 import GHC.Fingerprint.Type
+import GHC.Unit.Module (Module)
 import GHC.Unit.Module.Location ( ModLocation )
 import GHC.Unit.Module.ModIface
 import GHC.Driver.Phases
@@ -35,7 +36,14 @@ data TPhase res where
               -> Messages GhcMessage
               -> Maybe Fingerprint
               -> TPhase HscBackendAction
-  T_HscBackend :: PipeEnv -> HscEnv -> ModuleName -> HscSource -> ModLocation -> HscBackendAction -> TPhase ([FilePath], ModIface, HomeModLinkable, FilePath)
+  T_HscBackend :: PipeEnv
+               -> HscEnv
+               -> ModuleName
+               -> HscSource
+               -> ModLocation
+               -> HscBackendAction
+               -> Maybe ([Module] -> IO [(Module, HomeModInfo)]) -- wait for full dependency results before backend codegen
+               -> TPhase ([FilePath], ModIface, HomeModLinkable, FilePath)
   T_CmmCpp :: PipeEnv -> HscEnv -> FilePath -> TPhase FilePath
   T_Cmm :: PipeEnv -> HscEnv -> FilePath -> TPhase ([FilePath], FilePath)
   T_Cc :: Phase -> PipeEnv -> HscEnv -> Maybe ModLocation -> FilePath -> TPhase FilePath

@@ -172,6 +172,7 @@ import GHC.Iface.Ext.Binary ( readHieFile, writeHieFile , hie_file_result)
 import GHC.Iface.Ext.Debug  ( diffFile, validateScopes )
 
 import GHC.Core
+import GHC.Core.FVs            ( exprsSomeFreeVars )
 import GHC.Core.Lint.Interactive ( interactiveInScope )
 import GHC.Core.Tidy           ( tidyExpr )
 import GHC.Core.Utils          ( exprType )
@@ -233,8 +234,8 @@ import GHC.Types.Id
 import GHC.Types.SourceError
 import GHC.Types.SafeHaskell
 import GHC.Types.ForeignStubs
-import GHC.Types.Name.Env      ( mkNameEnv )
-import GHC.Types.Var.Env       ( mkEmptyTidyEnv )
+import GHC.Types.Name.Env      ( lookupNameEnv, mkNameEnv )
+import GHC.Types.Var.Env       ( VarEnv, lookupVarEnv, mkEmptyTidyEnv, mkVarEnv )
 import GHC.Types.Var.Set
 import GHC.Types.Error
 import GHC.Types.Fixity.Env
@@ -273,7 +274,7 @@ import GHC.SysTools.BaseDir (findTopDir)
 
 import Data.Data hiding (Fixity, TyCon)
 import Data.Functor ((<&>))
-import Data.List ( nub, isPrefixOf, partition )
+import Data.List ( nub, isPrefixOf, partition, sortBy )
 import qualified Data.List.NonEmpty as NE
 import Data.Traversable (for)
 import Control.Monad
@@ -290,6 +291,7 @@ import GHC.Unit.Module.WholeCoreBindings
 import GHC.Types.TypeEnv
 import System.IO
 import Data.Time
+import Language.Haskell.Syntax.Module.Name (moduleNameString)
 
 import System.IO.Unsafe ( unsafeInterleaveIO )
 import GHC.Iface.Env ( trace_if )
@@ -1315,6 +1317,7 @@ hscDesugarAndSimplify summary (FrontendTypecheck tc_result) tc_warnings mb_old_h
           return HscRecomp { hscs_guts = cg_guts,
                              hscs_mod_location = ms_location summary,
                              hscs_partial_iface = partial_iface,
+                             hscs_frontend_hashes = Nothing,
                              hscs_old_iface_hash = mb_old_hash
                            }
 
@@ -1954,10 +1957,10 @@ hscSimpleIface' mb_core_program tc_result summary = do
 --------------------------------------------------------------
 
 -- | Compile to hard-code.
-hscGenHardCode :: HscEnv -> CgGuts -> ModLocation -> FilePath
-               -> IO (FilePath, Maybe FilePath, [(ForeignSrcLang, FilePath)], Maybe StgCgInfos, Maybe CmmCgInfos )
+hscGenHardCode :: HscEnv -> Maybe ([Module] -> IO [(Module, HomeModInfo)]) -> CgGuts -> ModLocation -> FilePath
+               -> IO (FilePath, Maybe FilePath, [(ForeignSrcLang, FilePath)], Maybe StgCgInfos, Maybe CmmCgInfos, [Module], [(Module, HomeModInfo)] )
                 -- ^ @Just f@ <=> _stub.c is f
-hscGenHardCode hsc_env cgguts mod_loc output_filename = do
+hscGenHardCode hsc_env mb_pre_backend_wait cgguts mod_loc output_filename = do
         let CgGuts{ cg_module   = this_mod,
                     cg_binds    = core_binds,
                     cg_ccs      = local_ccs
@@ -2039,6 +2042,18 @@ hscGenHardCode hsc_env cgguts mod_loc output_filename = do
                 , lateCCState_ccState late_cc_state
                 )
 
+        let codegen_home_deps = collectCodegenHomeDeps hsc_env this_mod binds_to_prep
+        debugMr15378BackendDeps this_mod $
+          text "codegen_home_deps"
+            <+> ppr (map moduleName codegen_home_deps)
+        backend_dep_hmis <- case mb_pre_backend_wait of
+          Just wait | not (null codegen_home_deps) -> wait codegen_home_deps
+          _ -> pure []
+        debugMr15378BackendDeps this_mod $
+          text "backend_dep_hmis"
+            <+> ppr [ mi_module (hm_iface hmi) | (_, hmi) <- backend_dep_hmis ]
+        binds_to_prep' <- refreshImportedHomeCgInfos hsc_env this_mod backend_dep_hmis binds_to_prep
+
         let
           hooks  = hsc_hooks hsc_env
           tmpfs  = hsc_tmpfs hsc_env
@@ -2052,7 +2067,7 @@ hscGenHardCode hsc_env cgguts mod_loc output_filename = do
         (prepd_binds) <- {-# SCC "CorePrep" #-}
                          corePrepPgm
                            (hsc_logger hsc_env) cp_cfg cp_pgm_cfg
-                           this_mod binds_to_prep
+                           this_mod binds_to_prep'
 
         -----------------  Convert to STG ------------------
         (stg_binds_with_deps, denv, (caf_ccs, caf_cc_stacks), stg_cg_infos)
@@ -2108,7 +2123,7 @@ hscGenHardCode hsc_env cgguts mod_loc output_filename = do
 
               -- do the unfortunately effectual business
               stgToJS logger js_config stg_binds this_mod spt_entries foreign_stubs0 cost_centre_info output_filename
-              return (output_filename, stub_c_exists, foreign_fps, Just stg_cg_infos, Just cmm_cg_infos)
+              return (output_filename, stub_c_exists, foreign_fps, Just stg_cg_infos, Just cmm_cg_infos, codegen_home_deps, backend_dep_hmis)
 
             _          ->
               do
@@ -2137,7 +2152,92 @@ hscGenHardCode hsc_env cgguts mod_loc output_filename = do
                     codeOutput logger tmpfs llvm_config dflags (hsc_units hsc_env) this_mod output_filename mod_loc
                     foreign_stubs foreign_files dependencies (initDUniqSupply 'n' 0) rawcmms1
               return  ( output_filename, stub_c_exists, foreign_fps
-                      , Just stg_cg_infos, Just cmm_cg_infos)
+                      , Just stg_cg_infos, Just cmm_cg_infos, codegen_home_deps, backend_dep_hmis)
+
+collectCodegenHomeDeps :: HscEnv -> Module -> CoreProgram -> [Module]
+collectCodegenHomeDeps hsc_env this_mod binds =
+  sortBy stableModuleCmp $
+    S.toList $
+      S.fromList
+        [ mod
+        | v <- nonDetEltsUniqSet used_vars
+        , let mod = nameModule (idName v)
+        , mod /= this_mod
+        ]
+  where
+    used_vars =
+      exprsSomeFreeVars isCodegenHomeId (rhssOfBinds binds)
+
+    isCodegenHomeId v =
+      isId v
+      && isExternalName (idName v)
+      && HUG.memberHugUnit (moduleUnit (nameModule (idName v))) (hsc_HUG hsc_env)
+
+refreshImportedHomeCgInfos :: HscEnv -> Module -> [(Module, HomeModInfo)] -> CoreProgram -> IO CoreProgram
+refreshImportedHomeCgInfos hsc_env this_mod dep_hmis binds = do
+  debugMr15378BackendDeps this_mod $
+    text "refreshImportedHomeCgInfos type envs"
+      <+> ppr [ mod | (mod, _) <- dep_hmis ]
+  subst <- mkVarEnv <$> mapMaybeM refresh_id imported_ids
+  pure (map (refreshBind subst) binds)
+  where
+    waited_type_envs =
+      mkModuleEnv [ (mod, md_types (hm_details hmi)) | (mod, hmi) <- dep_hmis ]
+
+    imported_ids =
+      [ v
+      | v <- nonDetEltsUniqSet (exprsSomeFreeVars isCodegenHomeId (rhssOfBinds binds))
+      ]
+
+    isCodegenHomeId v =
+      isId v
+      && isExternalName (idName v)
+      && nameModule (idName v) /= this_mod
+      && HUG.memberHugUnit (moduleUnit (nameModule (idName v))) (hsc_HUG hsc_env)
+
+    refresh_id old_id = do
+      let dep_mod = nameModule (idName old_id)
+          waited_ty_thing =
+            lookupModuleEnv waited_type_envs dep_mod >>= \type_env ->
+              lookupNameEnv type_env (idName old_id)
+      maybe (lookupType hsc_env (idName old_id)) (pure . Just) waited_ty_thing >>= \case
+        Just (AnId new_id) -> pure (Just (old_id, refreshImportedCgInfo old_id new_id))
+        _ -> pure Nothing
+
+    refreshImportedCgInfo old_id new_id =
+      let with_caf = setIdCafInfo old_id (idCafInfo new_id)
+          with_lf = maybe with_caf (setIdLFInfo with_caf) (idLFInfo_maybe new_id)
+      in maybe with_lf (setIdTagSig with_lf) (idTagSig_maybe new_id)
+
+    refreshBind subst = \case
+      NonRec b e -> NonRec b (refreshExpr subst e)
+      Rec pairs -> Rec [ (b, refreshExpr subst e) | (b, e) <- pairs ]
+
+    refreshExpr :: VarEnv Id -> CoreExpr -> CoreExpr
+    refreshExpr subst = \case
+      GHC.Core.Var v -> maybe (GHC.Core.Var v) GHC.Core.Var (lookupVarEnv subst v)
+      Lit lit -> Lit lit
+      App f x -> App (refreshExpr subst f) (refreshExpr subst x)
+      Lam b e -> Lam b (refreshExpr subst e)
+      Let b e -> Let (refreshBind subst b) (refreshExpr subst e)
+      Case scrut b ty alts ->
+        Case (refreshExpr subst scrut) b ty
+          [ Alt con bs (refreshExpr subst rhs) | Alt con bs rhs <- alts ]
+      Cast e co -> Cast (refreshExpr subst e) co
+      Tick tick e -> Tick tick (refreshExpr subst e)
+      Type ty -> Type ty
+      Coercion co -> Coercion co
+
+debugMr15378BackendDeps :: Module -> SDoc -> IO ()
+debugMr15378BackendDeps this_mod doc
+  | moduleNameString (moduleName this_mod) == "GHC.Internal.Maybe"
+  = hPutStrLn stderr $
+      "[mr15378/main] "
+        ++ showSDocUnsafe (ppr this_mod)
+        ++ " :: "
+        ++ showSDocUnsafe doc
+  | otherwise
+  = pure ()
 
 
 -- The part of CgGuts that we need for HscInteractive

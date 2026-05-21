@@ -337,6 +337,15 @@ data Usage
         usg_safe :: IsSafeImport
             -- ^ Was this module imported as a safe import
     }
+  | UsageHomeModuleBackend {
+        usg_mod_name :: ModuleName,
+        -- ^ Name of the module
+        usg_unit_id :: UnitId,
+        -- ^ UnitId of the HomeUnit the module is from
+        usg_cg_hash :: Fingerprint
+        -- ^ Hash of backend-only codegen info (`CAF`, `LF`, `tag`) in the
+        -- dependency's final interface.
+    }
   -- | A file upon which the module depends, e.g. a CPP #include, or using TH's
   -- 'addDependentFile'
   | UsageFile {
@@ -409,6 +418,7 @@ data Usage
 instance NFData Usage where
   rnf (UsagePackageModule mod hash safe) = rnf mod `seq` rnf hash `seq` rnf safe `seq` ()
   rnf (UsageHomeModule mod uid hash entities exports safe) = rnf mod `seq` rnf uid `seq` rnf hash `seq` rnf entities `seq` rnf exports `seq` rnf safe `seq` ()
+  rnf (UsageHomeModuleBackend mod uid hash) = rnf mod `seq` rnf uid `seq` rnf hash `seq` ()
   rnf (UsageFile file hash label) = rnf file `seq` rnf hash `seq` rnf label `seq` ()
   rnf (UsageDirectory dir hash label) = rnf dir `seq` rnf hash `seq` rnf label `seq` ()
   rnf (UsageMergedRequirement mod hash) = rnf mod `seq` rnf hash `seq` ()
@@ -429,6 +439,12 @@ instance Binary Usage where
         put_ bh (usg_exports  usg)
         put_ bh (usg_entities usg)
         put_ bh (usg_safe     usg)
+
+    put_ bh usg@UsageHomeModuleBackend{} = do
+        putByte bh 6
+        put_ bh (usg_mod_name usg)
+        put_ bh (usg_unit_id  usg)
+        put_ bh (usg_cg_hash  usg)
 
     put_ bh usg@UsageFile{} = do
         putByte bh 2
@@ -470,6 +486,11 @@ instance Binary Usage where
             safe  <- get bh
             return UsageHomeModule { usg_mod_name = nm, usg_mod_hash = mod, usg_unit_id = uid,
                      usg_exports = exps, usg_entities = ents, usg_safe = safe }
+          6 -> do
+            mod <- get bh
+            uid <- get bh
+            hash <- get bh
+            return UsageHomeModuleBackend { usg_mod_name = mod, usg_unit_id = uid, usg_cg_hash = hash }
           2 -> do
             fp   <- get bh
             hash <- get bh

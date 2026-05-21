@@ -769,6 +769,17 @@ checkModUsage _  UsageHomeModuleInterface{ usg_mod_name = mod_name
     let reason = ModuleChangedIface mod_name
     checkIfaceFingerprint logger reason old_mod_hash (mi_iface_hash iface)
 
+checkModUsage _ UsageHomeModuleBackend
+  { usg_mod_name = mod_name
+  , usg_unit_id = uid
+  , usg_cg_hash = old_cg_hash
+  } = do
+    let mod = mkModule (RealUnit (Definite uid)) mod_name
+    logger <- getLogger
+    needInterface mod $ \iface -> do
+      let reason = ModuleChangedRaw mod_name
+      checkModuleFingerprint logger reason old_cg_hash (mi_cg_mod_hash iface)
+
 checkModUsage _ UsageHomeModule{
                                 usg_mod_name = mod_name,
                                 usg_unit_id  = uid,
@@ -780,8 +791,8 @@ checkModUsage _ UsageHomeModule{
     logger <- getLogger
     needInterface mod $ \iface -> do
      let
-         new_mod_hash    = mi_mod_hash iface
-         new_decl_hash   = mi_hash_fn  iface
+         new_mod_hash    = mi_frontend_mod_hash iface
+         new_decl_hash   = mi_frontend_hash_fn iface
          reason = ModuleChanged (moduleName mod)
 
      liftIO $ do
@@ -871,8 +882,8 @@ checkHomeModImport logger reason
                       2 (ppr changes)
                  return $ needsRecompileBecause reason
   where
-    new_orphan_like_hash = mi_orphan_like_hash iface
-    new_avails_hash      = mi_export_avails_hash iface
+    new_orphan_like_hash = mi_frontend_orphan_like_hash iface
+    new_avails_hash      = mi_frontend_export_avails_hash iface
     new_exports          = mi_exports iface
 
 -- | The exported avails of a module have changed. Should this cause recompilation
@@ -1200,10 +1211,11 @@ mkSelfRecomp hsc_env this_mod src_hash usages = do
 -- See Note [Fingerprinting IfaceDecls]
 addFingerprints
         :: HscEnv
+        -> Maybe IfaceFrontendHashes
         -> PartialModIface
         -> IO ModIface
-addFingerprints hsc_env iface0 = do
-  (abiHashes, caches, decls_w_hashes) <- addAbiHashes hsc_env (mi_mod_info iface0) (mi_public iface0) (mi_deps iface0)
+addFingerprints hsc_env mb_frontend_hashes iface0 = do
+  (abiHashes, hash_table, decls_w_hashes) <- addAbiHashes hsc_env (mi_mod_info iface0) (mi_public iface0) (mi_deps iface0)
 
    -- put the declarations in a canonical order, sorted by OccName
   let sorted_decls :: [(Fingerprint, IfaceDecl)]
@@ -1225,6 +1237,13 @@ addFingerprints hsc_env iface0 = do
       sorted_extra_decls = mi_simplified_core iface0 <&> \simpl_core ->
          IfaceSimplifiedCore (sortOn binding_key (mi_sc_extra_decls simpl_core)) (mi_sc_foreign simpl_core)
 
+      frontend_hashes =
+        fromMaybe
+          (mkFrontendHashes abiHashes hash_table (mi_self_recomp_info iface0) (mi_deps iface0))
+          mb_frontend_hashes
+
+      caches = mkIfaceCaches (mi_public iface0) hash_table (ifh_decl_hashes frontend_hashes)
+
   -- The interface hash depends on:
   --   - the ABI hash, plus
   --   - the things which can affect whether a module is recompiled
@@ -1236,7 +1255,7 @@ addFingerprints hsc_env iface0 = do
                          mi_deps iface0)
 
   let final_iface = completePartialModIface iface0 iface_hash
-                     sorted_decls sorted_extra_decls abiHashes caches
+                     sorted_decls sorted_extra_decls frontend_hashes abiHashes caches
    --
   return final_iface
 
@@ -1250,7 +1269,7 @@ addFingerprints hsc_env iface0 = do
 -- Why the convoluted way? Hashing individual declarations allows us to do fine-grained
 -- recompilation checking for home package modules, which record precisely what they use
 -- from each module.
-addAbiHashes :: HscEnv -> IfaceModInfo -> PartialIfacePublic -> Dependencies -> IO (IfaceAbiHashes, IfaceCache, [(Fingerprint, IfaceDecl)])
+addAbiHashes :: HscEnv -> IfaceModInfo -> PartialIfacePublic -> Dependencies -> IO (IfaceAbiHashes, IfaceHashTable, [(Fingerprint, IfaceDecl)])
 addAbiHashes hsc_env info
   iface_public
   deps = do
@@ -1267,11 +1286,10 @@ addAbiHashes hsc_env info
         complete
         _cache
         ()
+        ()
           = iface_public
       -- And these fields of deps should be in IfacePublic, but in good time.
       Dependencies _ _ _ sig_mods trusted_pkgs boot_mods orph_mods fis_mods  = deps
-      decl_warn_fn = mkIfaceDeclWarnCache (fromIfaceWarnings warns)
-      export_warn_fn = mkIfaceExportWarnCache (fromIfaceWarnings $ warns)
       fix_fn = mkIfaceFixCache fixities
 
       this_mod = mi_mod_info_module info
@@ -1487,6 +1505,8 @@ addAbiHashes hsc_env info
                        ann_fn AnnModule,
                        warns)
 
+      !cg_mod_hash = computeCgModHash decls_w_hashes
+
                       -- Surely the ABI depends on "module" annotations?
                       -- Also named defaults
 
@@ -1503,16 +1523,53 @@ addAbiHashes hsc_env info
       , mi_abi_export_avails_hash = exported_avails_hash
       , mi_abi_orphan_like_hash   = orphan_like_hash
       , mi_abi_orphan_hash        = orphan_hash
+      , mi_abi_cg_mod_hash        = cg_mod_hash
       }
-
-    caches = IfaceCache
-      { mi_cache_decl_warn_fn = decl_warn_fn
-      , mi_cache_export_warn_fn = export_warn_fn
-      , mi_cache_fix_fn = fix_fn
-      , mi_cache_hash_fn = lookupOccEnv local_env
-      }
-  return (final_iface_exts, caches, decls_w_hashes)
+  return (final_iface_exts, mkIfaceHashTable decls_w_hashes, decls_w_hashes)
   where
+
+computeCgModHash :: [(Fingerprint, IfaceDecl)] -> Fingerprint
+computeCgModHash decls_w_hashes =
+  computeFingerprint putNameLiterally $
+    mapMaybe cgInfo $
+      map snd $
+        sortOn (getOccName . snd) decls_w_hashes
+  where
+    cgInfo :: IfaceDecl -> Maybe (OccName, [IfaceInfoItem])
+    cgInfo IfaceId { ifName = nm, ifIdInfo = info }
+      = Just (getOccName nm, filter isCgInfo info)
+    cgInfo _ = Nothing
+
+    isCgInfo HsNoCafRefs = True
+    isCgInfo HsLFInfo {} = True
+    isCgInfo HsTagSig {} = True
+    isCgInfo _ = False
+
+mkFrontendHashes
+  :: IfaceAbiHashes
+  -> IfaceHashTable
+  -> Maybe IfaceSelfRecomp
+  -> Dependencies
+  -> IfaceFrontendHashes
+mkFrontendHashes abi_hashes hash_table self_recomp deps =
+  IfaceFrontendHashes
+    { ifh_mod_hash = mi_abi_mod_hash abi_hashes
+    , ifh_export_avails_hash = mi_abi_export_avails_hash abi_hashes
+    , ifh_orphan_like_hash = mi_abi_orphan_like_hash abi_hashes
+    , ifh_iface_hash = computeFingerprint putNameLiterally
+        (mi_abi_mod_hash abi_hashes, self_recomp, deps)
+    , ifh_decl_hashes = hash_table
+    }
+
+mkIfaceCaches :: PartialIfacePublic -> IfaceHashTable -> IfaceHashTable -> IfaceCache
+mkIfaceCaches iface_public full_hash_table frontend_hash_table =
+  IfaceCache
+    { mi_cache_decl_warn_fn = mkIfaceDeclWarnCache (fromIfaceWarnings (mi_warns_ iface_public))
+    , mi_cache_export_warn_fn = mkIfaceExportWarnCache (fromIfaceWarnings (mi_warns_ iface_public))
+    , mi_cache_fix_fn = mkIfaceFixCache (mi_fixities_ iface_public)
+    , mi_cache_hash_fn = mkIfaceHashCacheFromTable full_hash_table
+    , mi_cache_frontend_hash_fn = mkIfaceHashCacheFromTable frontend_hash_table
+    }
 
 {- Note [Take into account non-home package orphan modules]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

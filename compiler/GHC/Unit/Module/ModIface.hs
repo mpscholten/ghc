@@ -61,22 +61,27 @@ module GHC.Unit.Module.ModIface
    , set_mi_complete_matches
    , set_mi_docs
    , set_mi_abi_hashes
+   , set_mi_frontend_hashes
    , set_mi_ext_fields
    , set_mi_caches
    , set_mi_decl_warn_fn
    , set_mi_export_warn_fn
    , set_mi_fix_fn
    , set_mi_hash_fn
+   , set_mi_frontend_hash_fn
    , completePartialModIface
    , IfaceBinHandle(..)
    , PartialModIface
    , IfaceAbiHashes (..)
+   , IfaceFrontendHashes (..)
    , IfaceSelfRecomp (..)
+   , IfaceHashTable
    , IfaceCache (..)
    , IfaceSimplifiedCore (..)
    , withSelfRecomp
    , IfaceDeclExts
    , IfaceAbiHashesExts
+   , IfaceFrontendHashesExts
    , IfaceExport
    , IfacePublic_(..)
    , IfacePublic
@@ -101,6 +106,13 @@ module GHC.Unit.Module.ModIface
    , mi_mod_hash
    , mi_orphan
    , mi_finsts
+   , mi_frontend_hashes
+   , mi_frontend_hash_fn
+   , mi_frontend_mod_hash
+   , mi_frontend_export_avails_hash
+   , mi_frontend_orphan_like_hash
+   , mi_frontend_iface_hash
+   , mi_cg_mod_hash
    , mi_export_avails_hash
    , mi_orphan_like_hash
    , mi_orphan_hash
@@ -109,7 +121,9 @@ module GHC.Unit.Module.ModIface
    , emptyFullModIface
    , emptyIfaceBackend
    , emptyModIfaceCache
+   , mkIfaceHashTable
    , mkIfaceHashCache
+   , mkIfaceHashCacheFromTable
    , emptyIfaceHashCache
    , forceModIface
    )
@@ -147,6 +161,7 @@ import GHC.Utils.Binary
 
 import Control.DeepSeq
 import Control.Exception
+import Data.List (sortOn)
 
 
 {- Note [Interface file stages]
@@ -171,6 +186,8 @@ type ModIface = ModIface_ 'ModIfaceFinal
 type PartialIfacePublic = IfacePublic_ 'ModIfaceCore
 type IfacePublic = IfacePublic_ 'ModIfaceFinal
 
+type IfaceHashTable = [(OccName, (OccName, Fingerprint))]
+
 -- | Extends a PartialModIface with hashes of the ABI.
 --
 -- * The mi_mod_hash is the hash of the entire ABI
@@ -194,6 +211,22 @@ data IfaceAbiHashes = IfaceAbiHashes
   , mi_abi_orphan_hash :: !Fingerprint
     -- ^ Hash for orphan rules, class and family instances combined
     -- NOT transitive
+  , mi_abi_cg_mod_hash :: !Fingerprint
+    -- ^ Hash of backend-only CgInfo in canonical declaration order.
+  }
+
+data IfaceFrontendHashes = IfaceFrontendHashes
+  { ifh_mod_hash :: !Fingerprint
+    -- ^ Hash of the frontend-visible ABI contract only.
+  , ifh_export_avails_hash :: !Fingerprint
+    -- ^ Hash of the frontend-visible export avails.
+  , ifh_orphan_like_hash :: !Fingerprint
+    -- ^ Hash of frontend-visible orphan-like information.
+  , ifh_iface_hash :: !Fingerprint
+    -- ^ Interface hash computed from the frontend contract only.
+  , ifh_decl_hashes :: !IfaceHashTable
+    -- ^ Serialized frontend decl fingerprint table used to rebuild
+    -- `mi_frontend_hash_fn` when the iface is loaded from disk.
   }
 
 data IfaceCache = IfaceCache
@@ -208,6 +241,9 @@ data IfaceCache = IfaceCache
     -- the thing isn't in decls. It's useful to know that when seeing if we are
     -- up to date wrt. the old interface. The 'OccName' is the parent of the
     -- name, if it has one.
+  , mi_cache_frontend_hash_fn :: !(OccName -> Maybe (OccName, Fingerprint))
+    -- ^ Cached lookup for the frontend decl fingerprint table recorded in
+    -- `IfaceFrontendHashes`.
   }
 
 data ModIfacePhase
@@ -225,6 +261,10 @@ type family IfaceDeclExts (phase :: ModIfacePhase) = decl | decl -> phase where
 type family IfaceAbiHashesExts (phase :: ModIfacePhase) = bk | bk -> phase where
   IfaceAbiHashesExts 'ModIfaceCore = ()
   IfaceAbiHashesExts 'ModIfaceFinal = IfaceAbiHashes
+
+type family IfaceFrontendHashesExts (phase :: ModIfacePhase) = fh | fh -> phase where
+  IfaceFrontendHashesExts 'ModIfaceCore = ()
+  IfaceFrontendHashesExts 'ModIfaceFinal = IfaceFrontendHashes
 
 -- | In-memory byte array representation of a 'ModIface'.
 --
@@ -373,6 +413,10 @@ data IfacePublic_ phase = IfacePublic {
         mi_caches_ :: IfaceCache,
                 -- ^ Cached lookups of some parts of mi_public
 
+        mi_frontend_hashes_ :: (IfaceFrontendHashesExts phase),
+                -- ^ The frontend-only contract, embedded in final interfaces so
+                -- recompilation can avoid depending on backend-only CgInfo.
+
         mi_abi_hashes_ :: (IfaceAbiHashesExts phase)
                 -- ^ Either `()` or `IfaceAbiHashes` for
                 -- a fully instantiated interface.
@@ -391,9 +435,10 @@ mkIfacePublic :: [IfaceExport]
                   -> IfaceTrustInfo
                   -> Bool
                   -> [IfaceCompleteMatch]
+                  -> IfaceFrontendHashes
                   -> IfaceAbiHashes
                   -> IfacePublic
-mkIfacePublic exports decls fixities warns anns defaults insts fam_insts rules trust trust_pkg complete_matches abi_hashes = IfacePublic {
+mkIfacePublic exports decls fixities warns anns defaults insts fam_insts rules trust trust_pkg complete_matches frontend_hashes abi_hashes = IfacePublic {
   mi_exports_ = exports,
   mi_decls_ = decls,
   mi_fixities_ = fixities,
@@ -410,8 +455,10 @@ mkIfacePublic exports decls fixities warns anns defaults insts fam_insts rules t
     mi_cache_decl_warn_fn = mkIfaceDeclWarnCache $ fromIfaceWarnings warns,
     mi_cache_export_warn_fn = mkIfaceExportWarnCache $ fromIfaceWarnings warns,
     mi_cache_fix_fn = mkIfaceFixCache fixities,
-    mi_cache_hash_fn = mkIfaceHashCache decls
+    mi_cache_hash_fn = mkIfaceHashCache decls,
+    mi_cache_frontend_hash_fn = mkIfaceHashCacheFromTable (ifh_decl_hashes frontend_hashes)
   },
+  mi_frontend_hashes_ = frontend_hashes,
   mi_abi_hashes_ = abi_hashes
 }
 
@@ -521,6 +568,24 @@ mi_plugin_hash = fmap mi_sr_plugin_hash . mi_self_recomp_
 mi_mod_hash :: ModIface -> Fingerprint
 mi_mod_hash iface = mi_abi_mod_hash (mi_abi_hashes iface)
 
+mi_frontend_hashes :: ModIface -> IfaceFrontendHashes
+mi_frontend_hashes iface = mi_frontend_hashes_ (mi_public iface)
+
+mi_frontend_hash_fn :: ModIface -> OccName -> Maybe (OccName, Fingerprint)
+mi_frontend_hash_fn iface = mi_cache_frontend_hash_fn (mi_caches_ (mi_public iface))
+
+mi_frontend_mod_hash :: ModIface -> Fingerprint
+mi_frontend_mod_hash = ifh_mod_hash . mi_frontend_hashes
+
+mi_frontend_export_avails_hash :: ModIface -> Fingerprint
+mi_frontend_export_avails_hash = ifh_export_avails_hash . mi_frontend_hashes
+
+mi_frontend_orphan_like_hash :: ModIface -> Fingerprint
+mi_frontend_orphan_like_hash = ifh_orphan_like_hash . mi_frontend_hashes
+
+mi_frontend_iface_hash :: ModIface -> Fingerprint
+mi_frontend_iface_hash = ifh_iface_hash . mi_frontend_hashes
+
 -- | Accessor for whether this module has orphans from a ModIface.
 mi_orphan :: ModIface -> WhetherHasOrphans
 mi_orphan iface = mi_abi_orphan (mi_abi_hashes iface)
@@ -542,6 +607,9 @@ mi_orphan_like_hash iface = mi_abi_orphan_like_hash (mi_abi_hashes iface)
 -- | Accessor for the hash of orphan rules, class and family instances combined from a ModIface.
 mi_orphan_hash :: ModIface -> Fingerprint
 mi_orphan_hash iface = mi_abi_orphan_hash (mi_abi_hashes iface)
+
+mi_cg_mod_hash :: ModIface -> Fingerprint
+mi_cg_mod_hash iface = mi_abi_cg_mod_hash (mi_abi_hashes iface)
 
 -- | Old-style accessor for whether or not the ModIface came from an hs-boot
 -- file.
@@ -687,6 +755,7 @@ instance Binary (IfacePublic_ 'ModIfaceFinal) where
                        , mi_trust_ = trust
                        , mi_trust_pkg_ = trust_pkg
                        , mi_complete_matches_ = complete_matches
+                       , mi_frontend_hashes_ = frontend_hashes
                        , mi_abi_hashes_ = abi_hashes
                        }) = do
 
@@ -702,6 +771,7 @@ instance Binary (IfacePublic_ 'ModIfaceFinal) where
     lazyPut bh trust
     lazyPut bh trust_pkg
     lazyPut bh complete_matches
+    lazyPut bh frontend_hashes
     lazyPut bh abi_hashes
 
   get bh = do
@@ -717,8 +787,37 @@ instance Binary (IfacePublic_ 'ModIfaceFinal) where
     trust <- lazyGet bh
     trust_pkg <- lazyGet bh
     complete_matches <- lazyGet bh
+    frontend_hashes <- lazyGet bh
     abi_hashes <- lazyGet bh
-    return (mkIfacePublic exports decls fixities warns anns defaults insts fam_insts rules trust trust_pkg complete_matches abi_hashes)
+    return (mkIfacePublic exports decls fixities warns anns defaults insts fam_insts rules trust trust_pkg complete_matches frontend_hashes abi_hashes)
+
+instance Binary IfaceFrontendHashes where
+  put_ bh (IfaceFrontendHashes
+            { ifh_mod_hash = mod_hash
+            , ifh_export_avails_hash = export_hash
+            , ifh_orphan_like_hash = orphan_like_hash
+            , ifh_iface_hash = iface_hash
+            , ifh_decl_hashes = decl_hashes
+            }) = do
+    put_ bh mod_hash
+    put_ bh export_hash
+    put_ bh orphan_like_hash
+    put_ bh iface_hash
+    put_ bh decl_hashes
+
+  get bh = do
+    mod_hash <- get bh
+    export_hash <- get bh
+    orphan_like_hash <- get bh
+    iface_hash <- get bh
+    decl_hashes <- get bh
+    return IfaceFrontendHashes
+      { ifh_mod_hash = mod_hash
+      , ifh_export_avails_hash = export_hash
+      , ifh_orphan_like_hash = orphan_like_hash
+      , ifh_iface_hash = iface_hash
+      , ifh_decl_hashes = decl_hashes
+      }
 
 instance Binary IfaceAbiHashes where
   put_ bh (IfaceAbiHashes { mi_abi_mod_hash = mod_hash
@@ -727,6 +826,7 @@ instance Binary IfaceAbiHashes where
                               , mi_abi_export_avails_hash = vis_hash
                               , mi_abi_orphan_like_hash = invis_hash
                               , mi_abi_orphan_hash = orphan_hash
+                              , mi_abi_cg_mod_hash = cg_hash
                               }) = do
     put_ bh mod_hash
     put_ bh orphan
@@ -734,6 +834,7 @@ instance Binary IfaceAbiHashes where
     put_ bh vis_hash
     put_ bh invis_hash
     put_ bh orphan_hash
+    put_ bh cg_hash
   get bh =  do
     mod_hash <- get bh
     orphan <- get bh
@@ -741,13 +842,15 @@ instance Binary IfaceAbiHashes where
     vis_hash <- get bh
     invis_hash <- get bh
     orphan_hash <- get bh
+    cg_hash <- get bh
     return $ IfaceAbiHashes  {
                    mi_abi_mod_hash = mod_hash,
                    mi_abi_orphan = orphan,
                    mi_abi_finsts = hasFamInsts,
                    mi_abi_export_avails_hash = vis_hash,
                    mi_abi_orphan_like_hash = invis_hash,
-                   mi_abi_orphan_hash = orphan_hash
+                   mi_abi_orphan_hash = orphan_hash,
+                   mi_abi_cg_mod_hash = cg_hash
                    }
 
 instance Binary IfaceSimplifiedCore where
@@ -767,7 +870,7 @@ emptyPartialModIface mod
         mi_iface_hash_  = fingerprint0,
         mi_hi_bytes_    = PartialIfaceBinHandle,
         mi_deps_        = noDependencies,
-        mi_public_      = emptyPublicModIface (),
+        mi_public_      = emptyPublicModIface () (),
         mi_simplified_core_ = Nothing,
         mi_top_env_     = IfaceTopEnv emptyDetOrdAvails [] ,
         mi_docs_        = Nothing,
@@ -784,8 +887,8 @@ emptyIfaceModInfo mod = IfaceModInfo
   }
 
 
-emptyPublicModIface :: IfaceAbiHashesExts phase -> IfacePublic_ phase
-emptyPublicModIface abi_hashes = IfacePublic
+emptyPublicModIface :: IfaceFrontendHashesExts phase -> IfaceAbiHashesExts phase -> IfacePublic_ phase
+emptyPublicModIface frontend_hashes abi_hashes = IfacePublic
   { mi_exports_ = []
   , mi_decls_ = []
   , mi_fixities_ = []
@@ -795,6 +898,7 @@ emptyPublicModIface abi_hashes = IfacePublic
   , mi_insts_ = []
   , mi_fam_insts_ = []
   , mi_rules_ = []
+  , mi_frontend_hashes_ = frontend_hashes
   , mi_abi_hashes_ = abi_hashes
   , mi_trust_ = noIfaceTrustInfo
   , mi_trust_pkg_ = False
@@ -807,7 +911,8 @@ emptyModIfaceCache = IfaceCache {
   mi_cache_decl_warn_fn = emptyIfaceWarnCache,
   mi_cache_export_warn_fn = emptyIfaceWarnCache,
   mi_cache_fix_fn = emptyIfaceFixCache,
-  mi_cache_hash_fn = emptyIfaceHashCache
+  mi_cache_hash_fn = emptyIfaceHashCache,
+  mi_cache_frontend_hash_fn = emptyIfaceHashCache
 }
 
 emptyIfaceBackend :: IfaceAbiHashes
@@ -817,27 +922,44 @@ emptyIfaceBackend = IfaceAbiHashes
           mi_abi_finsts = False,
           mi_abi_export_avails_hash = fingerprint0,
           mi_abi_orphan_like_hash = fingerprint0,
-          mi_abi_orphan_hash = fingerprint0
+          mi_abi_orphan_hash = fingerprint0,
+          mi_abi_cg_mod_hash = fingerprint0
         }
 
 emptyFullModIface :: Module -> ModIface
 emptyFullModIface mod =
     (emptyPartialModIface mod)
-      { mi_public_ = emptyPublicModIface emptyIfaceBackend
+      { mi_public_ = emptyPublicModIface
+          IfaceFrontendHashes
+            { ifh_mod_hash = fingerprint0
+            , ifh_export_avails_hash = fingerprint0
+            , ifh_orphan_like_hash = fingerprint0
+            , ifh_iface_hash = fingerprint0
+            , ifh_decl_hashes = []
+            }
+          emptyIfaceBackend
       , mi_hi_bytes_ = FullIfaceBinHandle Strict.Nothing
       }
 
 
+mkIfaceHashTable :: [(Fingerprint,IfaceDecl)] -> IfaceHashTable
+mkIfaceHashTable pairs =
+  sortOn fst
+    [ (occ, parent_fp)
+    | (decl_hash, decl) <- pairs
+    , parent_fp@(occ, _) <- ifaceDeclFingerprints decl_hash decl
+    ]
+
+mkIfaceHashCacheFromTable :: IfaceHashTable -> (OccName -> Maybe (OccName, Fingerprint))
+mkIfaceHashCacheFromTable pairs
+  = \occ -> lookupOccEnv env occ
+  where
+    env = foldl' (\acc (occ, fp) -> extendOccEnv acc occ fp) emptyOccEnv pairs
+
 -- | Constructs cache for the 'mi_hash_fn' field of a 'ModIface'
 mkIfaceHashCache :: [(Fingerprint,IfaceDecl)]
                  -> (OccName -> Maybe (OccName, Fingerprint))
-mkIfaceHashCache pairs
-  = \occ -> lookupOccEnv env occ
-  where
-    env = foldl' add_decl emptyOccEnv pairs
-    add_decl env0 (v,d) = foldl' add env0 (ifaceDeclFingerprints v d)
-      where
-        add env0 (occ,hash) = extendOccEnv env0 occ (occ,hash)
+mkIfaceHashCache = mkIfaceHashCacheFromTable . mkIfaceHashTable
 
 emptyIfaceHashCache :: OccName -> Maybe (OccName, Fingerprint)
 emptyIfaceHashCache _occ = Nothing
@@ -845,6 +967,7 @@ emptyIfaceHashCache _occ = Nothing
 -- ModIface is completely forced since it will live in memory for a long time.
 -- If forcing it uses a lot of memory, then store less things in ModIface.
 instance ( NFData (IfaceAbiHashesExts (phase :: ModIfacePhase))
+         , NFData (IfaceFrontendHashesExts (phase :: ModIfacePhase))
          , NFData (IfaceDeclExts (phase :: ModIfacePhase))
          ) => NFData (ModIface_ phase) where
   rnf (PrivateModIface a1 a2 a3 a4 a5 a6 a7 a8 a9 a10)
@@ -870,16 +993,28 @@ instance NFData IfaceSimplifiedCore where
   rnf (IfaceSimplifiedCore eds fs) = rnf eds `seq` rnf fs
 
 instance NFData IfaceAbiHashes where
-  rnf (IfaceAbiHashes a1 a2 a3 a4 a5 a6)
+  rnf (IfaceAbiHashes a1 a2 a3 a4 a5 a6 a7)
     =  rnf a1
     `seq` rnf a2
     `seq` rnf a3
     `seq` rnf a4
     `seq` rnf a5
     `seq` rnf a6
+    `seq` rnf a7
 
-instance (NFData (IfaceAbiHashesExts phase), NFData (IfaceDeclExts phase)) => NFData (IfacePublic_ phase) where
-  rnf (IfacePublic a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14)
+instance NFData IfaceFrontendHashes where
+  rnf (IfaceFrontendHashes a1 a2 a3 a4 a5)
+    =  rnf a1
+    `seq` rnf a2
+    `seq` rnf a3
+    `seq` rnf a4
+    `seq` rnf a5
+
+instance ( NFData (IfaceAbiHashesExts phase)
+         , NFData (IfaceFrontendHashesExts phase)
+         , NFData (IfaceDeclExts phase)
+         ) => NFData (IfacePublic_ phase) where
+  rnf (IfacePublic a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15)
     =  rnf a1
     `seq` rnf a2
     `seq` rnf a3
@@ -894,6 +1029,7 @@ instance (NFData (IfaceAbiHashesExts phase), NFData (IfaceDeclExts phase)) => NF
     `seq` rnf a12
     `seq` rnf a13
     `seq` rnf a14
+    `seq` rnf a15
 
 instance NFData IfaceCache where
   rnf = rwhnf
@@ -945,11 +1081,12 @@ completePartialModIface :: PartialModIface
   -> Fingerprint
   -> [(Fingerprint, IfaceDecl)]
   -> Maybe IfaceSimplifiedCore
+  -> IfaceFrontendHashes
   -> IfaceAbiHashes
   -> IfaceCache
   -> ModIface
-completePartialModIface partial iface_hash decls extra_decls final_exts cache = partial
-  { mi_public_ = completePublicModIface decls final_exts cache (mi_public_ partial)
+completePartialModIface partial iface_hash decls extra_decls frontend_hashes final_exts cache = partial
+  { mi_public_ = completePublicModIface decls frontend_hashes final_exts cache (mi_public_ partial)
   , mi_simplified_core_ = extra_decls
   , mi_hi_bytes_ = FullIfaceBinHandle Strict.Nothing
   , mi_iface_hash_ = iface_hash
@@ -959,12 +1096,14 @@ completePartialModIface partial iface_hash decls extra_decls final_exts cache = 
 -- | Given a 'PartialIfacePublic', turn it into an 'IfacePublic' by completing
 -- missing fields.
 completePublicModIface :: [(Fingerprint, IfaceDecl)]
+                       -> IfaceFrontendHashes
                        -> IfaceAbiHashes
                        -> IfaceCache
                        -> PartialIfacePublic
                        -> IfacePublic
-completePublicModIface decls abi_hashes cache partial = partial
+completePublicModIface decls frontend_hashes abi_hashes cache partial = partial
   { mi_decls_ = decls
+  , mi_frontend_hashes_ = frontend_hashes
   , mi_abi_hashes_  = abi_hashes
   , mi_caches_ = cache
   }
@@ -1037,6 +1176,9 @@ set_mi_complete_matches val = set_mi_public (\iface -> iface { mi_complete_match
 set_mi_abi_hashes :: IfaceAbiHashesExts phase -> ModIface_ phase -> ModIface_ phase
 set_mi_abi_hashes val = set_mi_public (\iface -> iface { mi_abi_hashes_ = val })
 
+set_mi_frontend_hashes :: IfaceFrontendHashesExts phase -> ModIface_ phase -> ModIface_ phase
+set_mi_frontend_hashes val = set_mi_public (\iface -> iface { mi_frontend_hashes_ = val })
+
 {- Setters for mi_caches interface fields -}
 
 set_mi_decl_warn_fn :: (OccName -> Maybe (WarningTxt GhcRn)) -> ModIface_ phase -> ModIface_ phase
@@ -1050,6 +1192,9 @@ set_mi_fix_fn val = set_mi_public (\iface -> iface { mi_caches_ = (mi_caches_ if
 
 set_mi_hash_fn :: (OccName -> Maybe (OccName, Fingerprint)) -> ModIface_ phase -> ModIface_ phase
 set_mi_hash_fn val = set_mi_public (\iface -> iface { mi_caches_ = (mi_caches_ iface) { mi_cache_hash_fn = val } })
+
+set_mi_frontend_hash_fn :: (OccName -> Maybe (OccName, Fingerprint)) -> ModIface_ phase -> ModIface_ phase
+set_mi_frontend_hash_fn val = set_mi_public (\iface -> iface { mi_caches_ = (mi_caches_ iface) { mi_cache_frontend_hash_fn = val } })
 
 set_mi_caches :: IfaceCache -> ModIface_ phase -> ModIface_ phase
 set_mi_caches val = set_mi_public (\iface -> iface { mi_caches_ = val })

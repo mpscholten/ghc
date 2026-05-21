@@ -136,6 +136,12 @@ pprUsage UsageHomeModule{ usg_unit_id = unit_id, usg_mod_name = mod_name
         maybe empty (\v -> text "exports: " <> ppr v) exports $$
         vcat [ ppr n <+> ppr v | (n,v) <- entities ]
         )
+pprUsage usage@UsageHomeModuleBackend{}
+  = hsep [ text "backend"
+         , ppr (usg_mod_name usage)
+         , ppr (usg_unit_id usage)
+         , ppr (usg_cg_hash usage)
+         ]
 pprUsage usage@UsageFile{}
   = hsep [text "addDependentFile",
           doubleQuotes (ftext (usg_file_path usage)),

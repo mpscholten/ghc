@@ -49,7 +49,7 @@ import GHC.Prelude
 import GHC.Platform
 
 import GHC.Tc.Utils.Backpack
-import GHC.Tc.Utils.Monad  ( initIfaceCheck, concatMapM )
+import GHC.Tc.Utils.Monad  ( initIfaceCheck, initIfaceLoad, concatMapM )
 
 import GHC.Runtime.Interpreter
 import qualified GHC.Linker.Loader as Linker
@@ -67,7 +67,7 @@ import GHC.Driver.MakeSem
 import GHC.Driver.Downsweep
 import GHC.Driver.MakeAction
 
-import GHC.Iface.Load      ( cannotFindModule, readIface )
+import GHC.Iface.Load      ( cannotFindModule, loadSysInterface, readIface )
 import GHC.IfaceToCore     ( typecheckIface )
 import GHC.Iface.Recomp    ( RecompileRequired(..), CompileReason(..) )
 
@@ -112,12 +112,14 @@ import Data.Maybe
 import Data.List (sort, sortOn, groupBy, sortBy)
 import qualified Data.List as List
 import System.FilePath
+import System.IO (hPutStrLn, stderr)
 
 import Control.Monad.IO.Class
 import Control.Monad.Trans.Reader
 import qualified Data.Map.Strict as M
 import GHC.Types.TypeEnv
 import Control.Monad.Trans.State.Lazy
+import Language.Haskell.Syntax.Module.Name (moduleNameString)
 import Control.Monad.Trans.Class
 import GHC.Driver.Env.KnotVars
 import Control.Monad.Trans.Maybe
@@ -1140,12 +1142,72 @@ interpretBuildPlan hug mhmi_cache old_hpt plan pipelining = do
                      -- See Note [Pipelined compilation] for details on when we need full deps.
                      hsc_env <- asks hsc_env
                      let needs_full_deps = isJust $ needsFullDeps hsc_env ms rehydrate_mods home_mod_names
+                     -- If frontend work started with partial interfaces, wait for
+                     -- full results only for the home modules that backend codegen
+                     -- actually ends up using.
+                     let pre_backend_wait = Just $ \mods ->
+                                  forM (Set.toList (Set.fromList mods)) $ \mod ->
+                                    debugMr15378Wait (moduleNodeInfoModuleName ms) mod
+                                      (text "requested backend wait for deps"
+                                        <+> ppr (map moduleName mods))
+                                    >>
+                                    case lookupBuildResultForModule hug build_map mod of
+                                      Just br ->
+                                        debugMr15378Wait (moduleNodeInfoModuleName ms) mod
+                                          (text "resolved via build_map")
+                                        >>
+                                        runMaybeT (waitResult (resultVar br)) >>= \mb_res ->
+                                          case mb_res of
+                                            Just (Just hmi) ->
+                                              debugMr15378Wait (moduleNodeInfoModuleName ms) mod
+                                                (text "waitResult returned"
+                                                  <+> ppr (mi_module (hm_iface hmi)))
+                                              >> pure (mod, hmi)
+                                            Just Nothing ->
+                                              throwGhcExceptionIO $
+                                                ProgramError $
+                                                  showSDocUnsafe $
+                                                    text "pre_backend_wait: missing full result for"
+                                                      <+> ppr mod
+                                            Nothing ->
+                                              throwGhcExceptionIO $
+                                                ProgramError $
+                                                  showSDocUnsafe $
+                                                    text "pre_backend_wait: dependency failed before backend for"
+                                                      <+> ppr mod
+                                      Nothing -> do
+                                        debugMr15378Wait (moduleNodeInfoModuleName ms) mod
+                                          (text "missing from build_map; checking HUG/iface cache")
+                                        hmi <- HUG.lookupHugByModule mod hug >>= \mb_hmi ->
+                                          case mb_hmi of
+                                            Just hmi ->
+                                              debugMr15378Wait (moduleNodeInfoModuleName ms) mod
+                                                (text "resolved via HUG"
+                                                  <+> ppr (mi_module (hm_iface hmi)))
+                                              >> pure hmi
+                                            Nothing -> do
+                                              iface <- lookupIfaceByModuleHsc hsc_env mod >>= \mb_iface ->
+                                                case mb_iface of
+                                                  Just iface ->
+                                                    debugMr15378Wait (moduleNodeInfoModuleName ms) mod
+                                                      (text "resolved via lookupIfaceByModuleHsc"
+                                                        <+> ppr (mi_module iface))
+                                                    >> pure iface
+                                                  Nothing ->
+                                                    initIfaceLoad hsc_env $
+                                                      loadSysInterface (text "pre_backend_wait") mod
+                                              details <- initModDetails hsc_env iface
+                                              debugMr15378Wait (moduleNodeInfoModuleName ms) mod
+                                                (text "resolved via loadSysInterface"
+                                                  <+> ppr (mi_module iface))
+                                              pure (HomeModInfo iface details emptyHomeModInfoLinkable)
+                                        pure (mod, hmi)
                      -- See Note [Pipelined compilation] for why this guard is needed.
                      withPartialIfaceGuard partial_iface_var $ do
                        if pipelining && not needs_full_deps
                          then void $ wait_partial_ifaces build_deps
                          else void $ wait_deps build_deps
-                       hmi <- executeCompileNode mod_idx n_mods old_hmi hug rehydrate_mods ms frontend_signal_callback
+                       hmi <- executeCompileNode mod_idx n_mods old_hmi hug rehydrate_mods ms frontend_signal_callback pre_backend_wait
                        -- Write the HMI to an external cache (if one exists)
                        -- See Note [Caching HomeModInfo]
                        liftIO $ forM mhmi_cache $ \hmi_cache -> addHmiToCache hmi_cache hmi
@@ -1294,6 +1356,9 @@ upsweep_inst hsc_env mHscMessage mod_index nmods uid iuid = do
 -- successful. If no compilation happened, return the old Linkable.
 -- The optional frontend signal callback is invoked after the frontend completes,
 -- allowing dependent modules to start `T_Hsc`/`T_HscPostTc` earlier.
+-- The optional pre-backend wait callback is invoked after frontend signaling
+-- and before backend codegen for the subset of home modules that codegen
+-- actually needs.
 -- See Note [Pipelined compilation]
 upsweep_mod :: HscEnv
             -> Maybe Messager
@@ -1302,10 +1367,11 @@ upsweep_mod :: HscEnv
             -> Int  -- index of module
             -> Int  -- total number of modules
             -> Maybe (HomeModInfo -> IO ())  -- ^ callback for frontend interface signal
+            -> Maybe ([Module] -> IO [(Module, HomeModInfo)])  -- ^ callback to wait for full dependencies before backend codegen
             -> IO HomeModInfo
-upsweep_mod hsc_env mHscMessage old_hmi summary mod_index nmods mb_frontend_signal = do
+upsweep_mod hsc_env mHscMessage old_hmi summary mod_index nmods mb_frontend_signal mb_pre_backend_wait = do
   compileOneWithEarlySignal mHscMessage hsc_env summary
-              mod_index nmods (hm_iface <$> old_hmi) (maybe emptyHomeModInfoLinkable hm_linkable old_hmi) mb_frontend_signal
+              mod_index nmods (hm_iface <$> old_hmi) (maybe emptyHomeModInfoLinkable hm_linkable old_hmi) mb_frontend_signal mb_pre_backend_wait
 
 
 -- Note [When source is considered modified]
@@ -1641,6 +1707,9 @@ executeInstantiationNode k n deps uid iu = do
 -- | Execute the compilation of a module node.
 -- The optional frontend signal callback is invoked after the frontend completes,
 -- allowing dependent modules to start `T_Hsc`/`T_HscPostTc` earlier.
+-- The optional pre-backend wait callback is invoked after frontend signaling
+-- and before backend codegen for the subset of home modules that codegen
+-- actually needs.
 -- See Note [Pipelined compilation]
 executeCompileNode :: Int
   -> Int
@@ -1649,14 +1718,15 @@ executeCompileNode :: Int
   -> Maybe [ModuleName] -- List of modules we need to rehydrate before compiling
   -> ModuleNodeInfo
   -> Maybe (HomeModInfo -> IO ())  -- ^ Optional frontend interface signal callback
+  -> Maybe ([Module] -> IO [(Module, HomeModInfo)])  -- ^ Optional callback to wait for full dependencies before backend codegen
   -> RunMakeM HomeModInfo
-executeCompileNode k n !old_hmi hug mrehydrate_mods mni mb_frontend_signal = do
+executeCompileNode k n !old_hmi hug mrehydrate_mods mni mb_frontend_signal mb_pre_backend_wait = do
   me@MakeEnv{..} <- ask
   -- Rehydrate any dependencies if this module had a boot file or is a signature file.
   lift $ MaybeT (withAbstractSem compile_sem $ withLoggerHsc k me $ \hsc_env -> do
      hsc_env' <- liftIO $ maybeRehydrateBefore (setHUG hug hsc_env) mni fixed_mrehydrate_mods
      case mni of
-       ModuleNodeCompile mod -> executeCompileNodeWithSource hsc_env' me mod mb_frontend_signal
+       ModuleNodeCompile mod -> executeCompileNodeWithSource hsc_env' me mod mb_frontend_signal mb_pre_backend_wait
        ModuleNodeFixed key loc -> do
          -- For fixed modules, signal the interface immediately since it's already compiled
          result <- executeCompileNodeFixed hsc_env' me key loc
@@ -1691,8 +1761,8 @@ executeCompileNode k n !old_hmi hug mrehydrate_mods mni mb_frontend_signal = do
             let hm_linkable = HomeModLinkable mb_bytecode mb_object
             return (HomeModInfo iface details hm_linkable)
 
-    executeCompileNodeWithSource :: HscEnv -> MakeEnv -> ModSummary -> Maybe (HomeModInfo -> IO ()) -> IO (Maybe HomeModInfo)
-    executeCompileNodeWithSource hsc_env MakeEnv{diag_wrapper, env_messager} mod mb_signal = do
+    executeCompileNodeWithSource :: HscEnv -> MakeEnv -> ModSummary -> Maybe (HomeModInfo -> IO ()) -> Maybe ([Module] -> IO [(Module, HomeModInfo)]) -> IO (Maybe HomeModInfo)
+    executeCompileNodeWithSource hsc_env MakeEnv{diag_wrapper, env_messager} mod mb_signal mb_wait = do
      let -- Use the cached DynFlags which includes OPTIONS_GHC pragmas
          lcl_dynflags = ms_hspp_opts mod
      let lcl_hsc_env =
@@ -1702,7 +1772,7 @@ executeCompileNode k n !old_hmi hug mrehydrate_mods mni mb_frontend_signal = do
      -- Compile the module, locking with a semaphore to avoid too many modules
      -- being compiled at the same time leading to high memory usage.
      wrapAction diag_wrapper lcl_hsc_env $ do
-      res <- upsweep_mod lcl_hsc_env env_messager old_hmi mod k n mb_signal
+      res <- upsweep_mod lcl_hsc_env env_messager old_hmi mod k n mb_signal mb_wait
       cleanCurrentModuleTempFilesMaybe (hsc_logger hsc_env) (hsc_tmpfs hsc_env) lcl_dynflags
       return res
 
@@ -2027,6 +2097,57 @@ wait_partial_ifaces (br:brs) = do
             void $ lift $ waitResult (resultVar br)
     wait_partial_ifaces brs
 
+lookupBuildResultForModule :: HomeUnitGraph -> M.Map NodeKey BuildResult -> Module -> Maybe BuildResult
+lookupBuildResultForModule hug build_map mod =
+  case exact of
+    Just br -> Just br
+    Nothing ->
+      case instantiation_match of
+        Just br -> Just br
+        Nothing -> unique_name_match
+  where
+    exact =
+      M.lookup
+        (NodeKey_Module (ModNodeKeyWithUid (GWIB (moduleName mod) NotBoot) (moduleUnitId mod)))
+        build_map
+
+    same_name_matches =
+      [ (key, br)
+      | (NodeKey_Module key, br) <- M.toList build_map
+      , mnkModuleName key == GWIB (moduleName mod) NotBoot
+      ]
+
+    instantiation_match =
+      case filter matches_instantiation same_name_matches of
+        [(_, br)] -> Just br
+        _ -> Nothing
+
+    matches_instantiation (key, _) =
+      case HUG.lookupHugUnitId (mnkUnitId key) hug >>= HUG.homeUnitEnv_home_unit of
+        Just home_unit -> homeModuleNameInstantiation home_unit (moduleName mod) == mod
+        Nothing -> False
+
+    unique_name_match =
+      case same_name_matches of
+        [(_, br)] -> Just br
+        _ -> Nothing
+
+debugMr15378Wait current_mod dep_mod doc
+  | current_mod_s == "GHC.Internal.Maybe"
+    || dep_mod_s == "GHC.Internal.Control.Exception.Base"
+  = hPutStrLn stderr $
+      "[mr15378/make] "
+        ++ current_mod_s
+        ++ " -> "
+        ++ dep_mod_s
+        ++ " :: "
+        ++ showSDocUnsafe doc
+  | otherwise
+  = pure ()
+  where
+    current_mod_s = moduleNameString current_mod
+    dep_mod_s = moduleNameString (moduleName dep_mod)
+
 {- Note [Pipelined compilation]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 When compiling with -j, we want to maximize parallelism. In the standard
@@ -2096,6 +2217,11 @@ Implementation:
    - We call `addFingerprints` to construct the frontend interface
    - The frontend interface has fingerprints but no CAF/LF/tag info
    - The frontend signal callback is invoked with this interface
+   - If the module started from partial deps, a pre-iface-finalization wait
+     callback is threaded through the backend pipeline
+   - Backend codegen can start immediately without waiting for full deps
+   - Right before final interface emission, self-recomp usages are refreshed
+     from full dependency interfaces
 
 3. In buildSingleModule (this module):
    - For ModuleNode, we create partialIfaceVar
@@ -2103,6 +2229,8 @@ Implementation:
    - For dependency waiting we use:
      * wait_partial_ifaces when frontend interfaces are sufficient
      * wait_deps when full HomeModInfo is required
+   - If wait_partial_ifaces was used, we also thread a pre-iface-finalization
+     wait callback so usage finalization runs only after full dependency results
 
 4. The partial HomeModInfo uses:
    - The frontend interface (WITH fingerprints and unfoldings, WITHOUT CAF/LF/tag info)
@@ -2123,6 +2251,8 @@ Implementation:
 7. Waiting:
    - wait_partial_ifaces waits for the signal-only MVar (True or False)
    - wait_deps waits for the full HomeModInfo result
+   - pre-iface-finalization wait (when present) waits for full dependency
+     results after frontend signaling and right before final interface emission
    - On failure (False signal), wait_partial_ifaces falls back to waitResult
      to propagate the error via MaybeT
    - Signal ordering invariant: a module signals `partialIfaceVar = True` only

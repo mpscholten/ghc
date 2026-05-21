@@ -18,7 +18,9 @@ import GHC.Driver.Pipeline.Monad
 import GHC.Driver.Pipeline.Phases
 import GHC.Driver.Env hiding (Hsc)
 import GHC.Unit.Module.Location
-import GHC.Unit.Module.ModGuts (cg_foreign, cg_foreign_files)
+import GHC.Unit.Module (stableModuleCmp)
+import GHC.Unit.Module.Deps (Usage (..))
+import GHC.Unit.Module.ModGuts (cg_binds, cg_foreign, cg_foreign_files)
 import GHC.Driver.Phases
 import GHC.Unit.Types
 import GHC.Types.ForeignStubs (ForeignStubs (NoStubs))
@@ -28,6 +30,8 @@ import GHC.Unit.Module.ModIface
 import GHC.Driver.Backend
 import GHC.Driver.Session
 import GHC.Unit.Module.ModSummary
+import GHC.Core
+import GHC.Core.FVs (exprsSomeFreeVars)
 import qualified GHC.LanguageExtensions as LangExt
 import GHC.Types.SrcLoc
 import GHC.Driver.Main
@@ -37,9 +41,10 @@ import GHC.Types.Error
 import GHC.Driver.Errors.Types
 import GHC.Fingerprint
 import GHC.Utils.Logger
+import GHC.Utils.Monad (mapMaybeM)
 import GHC.Utils.TmpFs
 import GHC.Platform
-import Data.List (intercalate, isInfixOf)
+import Data.List (intercalate, isInfixOf, sortBy)
 import qualified Data.List.NonEmpty as NE
 import GHC.Unit.Env
 import GHC.Utils.Error
@@ -56,10 +61,12 @@ import GHC.Unit.State
 import GHC.Unit.Home
 import GHC.Data.Maybe
 import GHC.Iface.Make
+import GHC.Iface.Load (loadSysInterface)
 import GHC.Driver.Config.Parser
 import GHC.Parser.Header
 import GHC.Data.StringBuffer
 import GHC.Data.OsPath (unsafeEncodeUtf)
+import GHC.Tc.Utils.Monad (initIfaceLoad)
 import GHC.Types.SourceError
 import GHC.Unit.Finder
 import Data.IORef
@@ -78,6 +85,11 @@ import GHC.Utils.Touch
 import GHC.Unit.Module.Env
 import GHC.Driver.Env.KnotVars
 import GHC.Driver.Config.Finder
+import GHC.Types.Id
+import GHC.Types.Name
+import GHC.Types.Unique.Set (nonDetEltsUniqSet)
+import qualified Data.Set as Set
+import qualified GHC.Unit.Home.Graph as HUG
 import GHC.Rename.Names
 import GHC.StgToJS.Linker.Linker (embedJsFile)
 
@@ -115,8 +127,8 @@ runPhase (T_HscRecomp pipe_env hsc_env fp hsc_src) = do
 runPhase (T_Hsc hsc_env mod_sum) = runHscTcPhase hsc_env mod_sum
 runPhase (T_HscPostTc hsc_env ms fer m mfi) =
   runHscPostTcPhase hsc_env ms fer m mfi
-runPhase (T_HscBackend pipe_env hsc_env mod_name hsc_src location x) = do
-  runHscBackendPhase pipe_env hsc_env mod_name hsc_src location x
+runPhase (T_HscBackend pipe_env hsc_env mod_name hsc_src location x mb_pre_backend_wait) = do
+  runHscBackendPhase pipe_env hsc_env mod_name hsc_src location x mb_pre_backend_wait
 runPhase (T_CmmCpp pipe_env hsc_env input_fn) = do
   output_fn <- phaseOutputFilenameNew Cmm pipe_env hsc_env Nothing
   doCpp (hsc_logger hsc_env)
@@ -504,12 +516,75 @@ runHscBackendPhase :: PipeEnv
                    -> HscSource
                    -> ModLocation
                    -> HscBackendAction
+                   -> Maybe ([Module] -> IO [(Module, HomeModInfo)])
                    -> IO ([FilePath], ModIface, HomeModLinkable, FilePath)
-runHscBackendPhase pipe_env hsc_env mod_name src_flavour location result = do
+runHscBackendPhase pipe_env hsc_env mod_name src_flavour location result mb_pre_backend_wait = do
   let dflags = hsc_dflags hsc_env
       logger = hsc_logger hsc_env
       o_file = if dynamicNow dflags then ml_dyn_obj_file location else ml_obj_file location -- The real object file
       next_phase = hscPostBackendPhase src_flavour (backend dflags)
+      finalizeSelfRecompInfo :: [Module] -> [(Module, HomeModInfo)] -> PartialModIface -> IO PartialModIface
+      finalizeSelfRecompInfo codegen_home_deps backend_dep_hmis partial_iface
+        | not (gopt Opt_WriteSelfRecompInfo dflags)
+        = return partial_iface
+        | otherwise
+        = case mi_self_recomp_info partial_iface of
+            Nothing -> return partial_iface
+            Just self_recomp -> do
+              debugMr15378Finalize (mi_module partial_iface) $
+                text "finalizeSelfRecompInfo deps"
+                  <+> ppr (map moduleName codegen_home_deps)
+                  <+> text "backend_dep_hmis"
+                  <+> ppr [ mi_module (hm_iface hmi) | (_, hmi) <- backend_dep_hmis ]
+              backend_usages <- mapMaybeM (mk_backend_usage backend_dep_hmis) (sortBy stableModuleCmp codegen_home_deps)
+              let refreshed_self_recomp =
+                    self_recomp { mi_sr_usages = mi_sr_usages self_recomp ++ backend_usages }
+              return $ set_mi_self_recomp (Just refreshed_self_recomp) partial_iface
+
+      mk_backend_usage backend_dep_hmis dep_mod = do
+        debugMr15378FinalizeName mod_name $
+          text "mk_backend_usage for"
+            <+> ppr dep_mod
+            <+> text "present_in_backend_dep_hmis"
+            <+> ppr (isJust (lookup dep_mod backend_dep_hmis))
+        iface <- case lookup dep_mod backend_dep_hmis of
+          Just hmi -> pure (hm_iface hmi)
+          Nothing -> loadBackendIface dep_mod
+        return $ Just UsageHomeModuleBackend
+          { usg_mod_name = moduleName dep_mod
+          , usg_unit_id = moduleUnitId dep_mod
+          , usg_cg_hash = mi_cg_mod_hash iface
+          }
+
+      loadBackendIface dep_mod =
+        debugMr15378FinalizeName mod_name
+          (text "loadBackendIface fallback for" <+> ppr dep_mod)
+        >>
+        lookupIfaceByModuleHsc hsc_env dep_mod >>= \mb_iface ->
+          case mb_iface of
+            Just iface
+              | mi_cg_mod_hash iface /= fingerprint0
+              -> pure iface
+            _ ->
+              initIfaceLoad hsc_env $
+                loadSysInterface (text "runHscBackendPhase") dep_mod
+
+      collectCodegenHomeDeps :: Module -> CoreProgram -> [Module]
+      collectCodegenHomeDeps current_mod binds =
+        sortBy stableModuleCmp $
+          Set.toList $
+            Set.fromList
+              [ mod
+              | v <- nonDetEltsUniqSet (exprsSomeFreeVars isCodegenHomeId (rhssOfBinds binds))
+              , let mod = nameModule (idName v)
+              , mod /= current_mod
+              ]
+
+      isCodegenHomeId v =
+        isId v
+        && isExternalName (idName v)
+        && HUG.memberHugUnit (moduleUnit (nameModule (idName v))) (hsc_HUG hsc_env)
+
   case result of
       HscUpdate iface ->
           if | not (backendGeneratesCode (backend dflags))  ->
@@ -542,6 +617,7 @@ runHscBackendPhase pipe_env hsc_env mod_name src_flavour location result = do
       HscRecomp { hscs_guts = cgguts,
                   hscs_mod_location = mod_location,
                   hscs_partial_iface = partial_iface,
+                  hscs_frontend_hashes = mb_frontend_hashes,
                   hscs_old_iface_hash = mb_old_iface_hash
                 }
         -> if not (backendGeneratesCode (backend dflags)) then
@@ -549,8 +625,8 @@ runHscBackendPhase pipe_env hsc_env mod_name src_flavour location result = do
            else if backendWritesFiles (backend dflags) then
              do
               output_fn <- phaseOutputFilenameNew next_phase pipe_env hsc_env (Just location)
-              (outputFilename, mStub, foreign_files, stg_infos, cg_infos) <-
-                hscGenHardCode hsc_env cgguts mod_location output_fn
+              (outputFilename, mStub, foreign_files, stg_infos, cg_infos, codegen_home_deps, backend_dep_hmis) <-
+                hscGenHardCode hsc_env mb_pre_backend_wait cgguts mod_location output_fn
 
               stub_o <- mapM (compileStub hsc_env) mStub
               foreign_os <-
@@ -560,7 +636,8 @@ runHscBackendPhase pipe_env hsc_env mod_name src_flavour location result = do
                     | gopt Opt_WriteIfSimplifiedCore dflags = (cg_foreign cgguts, cg_foreign_files cgguts)
                     | otherwise = (NoStubs, [])
 
-              final_iface <- mkFullIface hsc_env partial_iface stg_infos cg_infos iface_stubs iface_files
+              partial_iface' <- finalizeSelfRecompInfo codegen_home_deps backend_dep_hmis partial_iface
+              final_iface <- mkFullIface hsc_env mb_frontend_hashes partial_iface' stg_infos cg_infos iface_stubs iface_files
 
               -- See Note [Writing interface files]
               hscMaybeWriteIface logger dflags False final_iface mb_old_iface_hash mod_location
@@ -582,10 +659,41 @@ runHscBackendPhase pipe_env hsc_env mod_name src_flavour location result = do
               -- In interpreted mode the regular codeGen backend is not run so we
               -- generate a interface without codeGen info.
             do
-              final_iface <- mkFullIface hsc_env partial_iface Nothing Nothing NoStubs []
+              let codegen_home_deps = collectCodegenHomeDeps (mi_module partial_iface) (cg_binds cgguts)
+              debugMr15378Finalize (mi_module partial_iface) $
+                text "bytecode path deps"
+                  <+> ppr (map moduleName codegen_home_deps)
+              backend_dep_hmis <- case mb_pre_backend_wait of
+                Just wait -> wait codegen_home_deps
+                Nothing -> pure []
+              partial_iface' <- finalizeSelfRecompInfo codegen_home_deps backend_dep_hmis partial_iface
+              final_iface <- mkFullIface hsc_env mb_frontend_hashes partial_iface' Nothing Nothing NoStubs []
               hscMaybeWriteIface logger dflags True final_iface mb_old_iface_hash location
               bc <- generateAndWriteByteCodeLinkable hsc_env (mkCgInteractiveGuts cgguts) mod_location
               return ([], final_iface, emptyHomeModInfoLinkable { homeMod_bytecode = Just bc } , panic "interpreter")
+
+debugMr15378Finalize :: Module -> SDoc -> IO ()
+debugMr15378Finalize this_mod doc
+  | moduleNameString (moduleName this_mod) == "GHC.Internal.Maybe"
+    || "GHC.Internal.Control.Exception.Base" `isInfixOf` showSDocUnsafe doc
+  = hPutStrLn stderr $
+      "[mr15378/execute] "
+        ++ showSDocUnsafe (ppr this_mod)
+        ++ " :: "
+        ++ showSDocUnsafe doc
+  | otherwise
+  = pure ()
+
+debugMr15378FinalizeName this_mod doc
+  | moduleNameString this_mod == "GHC.Internal.Maybe"
+    || "GHC.Internal.Control.Exception.Base" `isInfixOf` showSDocUnsafe doc
+  = hPutStrLn stderr $
+      "[mr15378/execute] "
+        ++ moduleNameString this_mod
+        ++ " :: "
+        ++ showSDocUnsafe doc
+  | otherwise
+  = pure ()
 
 
 runUnlitPhase :: HscEnv -> FilePath -> FilePath -> IO FilePath
