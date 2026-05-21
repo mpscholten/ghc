@@ -2611,6 +2611,7 @@ fFlagsDeps = [
   flagSpec "inline-generics-aggressively"     Opt_InlineGenericsAggressively,
   flagSpec "static-argument-transformation"   Opt_StaticArgumentTransformation,
   flagSpec "strictness"                       Opt_Strictness,
+  flagSpec "three-phase-iface"                Opt_ThreePhaseIface,
   flagSpec "use-rpaths"                       Opt_RPath,
   flagSpec "write-interface"                  Opt_WriteInterface,
   flagSpec "write-if-simplified-core"         Opt_WriteIfSimplifiedCore,

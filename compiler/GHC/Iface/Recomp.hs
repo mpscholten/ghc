@@ -13,6 +13,8 @@ module GHC.Iface.Recomp
    , recompileRequired
    , addFingerprints
    , mkSelfRecomp
+   -- * Interface mode for fingerprinting
+   , IfaceMode(..)
    )
 where
 
@@ -171,6 +173,17 @@ instance Semigroup RecompileRequired where
 
 instance Monoid RecompileRequired where
   mempty = UpToDate
+
+-- | Mode for interface generation, affects fingerprint computation.
+-- See Note [Three-phase interface generation] in GHC.Tc.Gen.Bind
+data IfaceMode
+  = EarlyIface  -- ^ Early interface: skip DFun fingerprint dependencies.
+                -- Used when generating an interface after type/class declarations
+                -- and signatures are typechecked, but before function bodies.
+                -- DFun fingerprints aren't available yet at this point.
+  | FullIface   -- ^ Full interface: include all fingerprint dependencies.
+                -- Used for the final interface after all typechecking is complete.
+  deriving (Eq)
 
 data RecompReason
   = UnitDepRemoved (ImportLevel, UnitId)
@@ -1199,11 +1212,13 @@ mkSelfRecomp hsc_env this_mod src_hash usages = do
 --
 -- See Note [Fingerprinting IfaceDecls]
 addFingerprints
-        :: HscEnv
+        :: IfaceMode     -- ^ Interface mode: 'EarlyIface' skips DFun dependencies,
+                         --   'FullIface' includes all dependencies
+        -> HscEnv
         -> PartialModIface
         -> IO ModIface
-addFingerprints hsc_env iface0 = do
-  (abiHashes, caches, decls_w_hashes) <- addAbiHashes hsc_env (mi_mod_info iface0) (mi_public iface0) (mi_deps iface0)
+addFingerprints iface_mode hsc_env iface0 = do
+  (abiHashes, caches, decls_w_hashes) <- addAbiHashes iface_mode hsc_env (mi_mod_info iface0) (mi_public iface0) (mi_deps iface0)
 
    -- put the declarations in a canonical order, sorted by OccName
   let sorted_decls :: [(Fingerprint, IfaceDecl)]
@@ -1250,8 +1265,8 @@ addFingerprints hsc_env iface0 = do
 -- Why the convoluted way? Hashing individual declarations allows us to do fine-grained
 -- recompilation checking for home package modules, which record precisely what they use
 -- from each module.
-addAbiHashes :: HscEnv -> IfaceModInfo -> PartialIfacePublic -> Dependencies -> IO (IfaceAbiHashes, IfaceCache, [(Fingerprint, IfaceDecl)])
-addAbiHashes hsc_env info
+addAbiHashes :: IfaceMode -> HscEnv -> IfaceModInfo -> PartialIfacePublic -> Dependencies -> IO (IfaceAbiHashes, IfaceCache, [(Fingerprint, IfaceDecl)])
+addAbiHashes iface_mode hsc_env info
   iface_public
   deps = do
   eps <- hscEPS hsc_env
@@ -1289,7 +1304,7 @@ addAbiHashes hsc_env info
        -- TODO: I'm not sure if this should be semantic_mod or this_mod.
        -- See also Note [Identity versus semantic module]
       declABI decl = (this_mod, decl, extras)
-        where extras = declExtras fix_fn ann_fn non_orph_rules non_orph_insts
+        where extras = declExtras iface_mode fix_fn ann_fn non_orph_rules non_orph_insts
                                   non_orph_fis top_lvl_name_env complete_matches decl
 
        -- This is used for looking up the Name of a default method
@@ -1760,7 +1775,12 @@ instance Binary IfaceIdExtras where
   get _bh = panic "no get for IfaceIdExtras"
   put_ bh (IdExtras fix rules anns complete) = do { put_ bh fix; put_ bh rules; put_ bh anns; put_ bh complete }
 
-declExtras :: (OccName -> Maybe Fixity)
+-- | Compute extra information for a declaration that affects its fingerprint.
+-- In 'EarlyIface' mode, we skip DFun dependencies because DFun fingerprints
+-- aren't available yet (instance bodies haven't been typechecked).
+-- See Note [Three-phase interface generation] in GHC.Tc.Gen.Bind
+declExtras :: IfaceMode             -- ^ Interface mode
+           -> (OccName -> Maybe Fixity)
            -> (AnnCacheKey -> [AnnPayload])
            -> OccEnv [IfaceRule]
            -> OccEnv [IfaceClsInst]
@@ -1770,13 +1790,13 @@ declExtras :: (OccName -> Maybe Fixity)
            -> IfaceDecl
            -> IfaceDeclExtras
 
-declExtras fix_fn ann_fn rule_env inst_env fi_env dm_env complete_env decl
+declExtras iface_mode fix_fn ann_fn rule_env inst_env fi_env dm_env complete_env decl
   = case decl of
       IfaceId{} -> IfaceIdExtras (id_extras n)
       IfaceData{ifCons=cons} ->
                      IfaceDataExtras (fix_fn n)
                         (map ifFamInstAxiom (lookupOccEnvL fi_env n) ++
-                         map ifDFun         (lookupOccEnvL inst_env n))
+                         dfun_deps n)
                         (ann_fn (AnnOccName n))
                         (map (id_extras . occName . ifConName) (visibleIfConDecls cons))
       IfaceClass{ifBody = IfConcreteClass { ifSigs=sigs, ifATs=ats }} ->
@@ -1784,8 +1804,11 @@ declExtras fix_fn ann_fn rule_env inst_env fi_env dm_env complete_env decl
           where
             insts =
               let (atFamInsts, atClsInsts) = foldMap at_extras ats
-              in (ifFamInstAxiom <$> atFamInsts) ++ (ifDFun <$> atClsInsts)
-                 ++ (ifDFun <$> lookupOccEnvL inst_env n)
+              -- In EarlyIface mode, skip DFun dependencies (fingerprints not available yet)
+              in (ifFamInstAxiom <$> atFamInsts) ++
+                 (case iface_mode of
+                    EarlyIface -> []
+                    FullIface  -> (ifDFun <$> atClsInsts) ++ (ifDFun <$> lookupOccEnvL inst_env n))
                            -- Include instances and axioms of the associated types
                            -- as well as instances of the class (#5147) (#26183)
             meths = [id_extras (getOccName op) | IfaceClassOp op _ _ <- sigs]
@@ -1798,7 +1821,7 @@ declExtras fix_fn ann_fn rule_env inst_env fi_env dm_env complete_env decl
                                            (ann_fn (AnnOccName n))
       IfaceFamily{} -> IfaceFamilyExtras (fix_fn n)
                         (map ifFamInstAxiom (lookupOccEnvL fi_env n)
-                        ++ map ifDFun (lookupOccEnvL inst_env n)
+                        ++ dfun_deps n
                         )
                         (ann_fn (AnnOccName n))
       IfacePatSyn{} -> IfacePatSynExtras (fix_fn n) (lookup_complete_match n)
@@ -1812,6 +1835,12 @@ declExtras fix_fn ann_fn rule_env inst_env fi_env dm_env complete_env decl
           )
 
         lookup_complete_match occ = lookupOccEnvL complete_env occ
+
+        -- In EarlyIface mode, skip DFun dependencies because DFun fingerprints
+        -- aren't available yet (instance bodies haven't been typechecked).
+        dfun_deps occ = case iface_mode of
+          EarlyIface -> []
+          FullIface  -> map ifDFun (lookupOccEnvL inst_env occ)
 
 {- Note [default method Name] (see also #15970)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

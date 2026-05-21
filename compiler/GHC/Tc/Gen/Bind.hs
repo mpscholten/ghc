@@ -9,6 +9,8 @@
 module GHC.Tc.Gen.Bind
    ( tcLocalBinds
    , tcTopBinds
+   , tcTopSigs
+   , tcTopBodies
    , tcValBinds
    , tcHsBootSigs
    , tcPolyCheck
@@ -198,6 +200,65 @@ tcTopBinds binds sigs
         ; return (tcg_env', tcl_env) }
         -- The top level bindings are flattened into a giant
         -- implicitly-mutually-recursive LHsBinds
+
+-- | Typecheck top-level type signatures only, returning the signature Ids and
+-- lookup function. This allows signaling an early interface after type/class decls
+-- and signatures are checked, but before function bodies are typechecked.
+-- See Note [Three-phase interface generation]
+tcTopSigs :: [(RecFlag, LHsBinds GhcRn)] -> [LSig GhcRn]
+          -> TcM ([TcId], TcSigFun, TcPragEnv)
+tcTopSigs binds sigs
+  = do  { let patsyns = getPatSynBinds binds
+              prag_fn = mkPragEnv sigs (concatMap snd binds)
+        ; (poly_ids, sig_fn) <- tcAddPatSynPlaceholders patsyns $
+                                tcTySigs sigs
+        ; return (poly_ids, sig_fn, prag_fn) }
+
+-- | Typecheck top-level binding bodies, given the signature information
+-- computed by tcTopSigs. This is the second phase of three-phase compilation.
+-- See Note [Three-phase interface generation]
+tcTopBodies :: [(RecFlag, LHsBinds GhcRn)] -> [LSig GhcRn]
+            -> [TcId] -> TcSigFun -> TcPragEnv
+            -> TcM (TcGblEnv, TcLclEnv)
+tcTopBodies binds sigs poly_ids sig_fn prag_fn
+  = do  { let patsyns = getPatSynBinds binds
+        -- Extend the environment with signature Ids
+        ; tcExtendSigIds TopLevel poly_ids $
+     do { (binds', (tcg_env, tcl_env))
+              <- tcAddPatSynPlaceholders patsyns $
+                 tcBindGroups TopLevel sig_fn prag_fn binds getEnvs
+        ; specs <- tcImpPrags sigs   -- SPECIALISE prags for imported Ids
+        ; let { tcg_env' = tcg_env { tcg_imp_specs
+                                      = specs ++ tcg_imp_specs tcg_env }
+                           `addTypecheckedBinds` map snd binds' }
+        ; return (tcg_env', tcl_env) }}
+
+{- Note [Three-phase interface generation]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+For improved parallel compilation, we split typechecking into phases:
+
+1. tcTopSigs: Typecheck top-level signatures
+   - Returns: poly_ids (exported function types), sig_fn (signature lookup), prag_fn (pragmas)
+   - After this + type/class decls, we can signal an "early interface"
+   - Dependent modules can start typechecking with just this info
+
+2. tcTopBodies: Typecheck function bodies
+   - Uses the sig_fn and prag_fn from tcTopSigs
+   - After this, we signal the "partial interface" (same as two-phase)
+
+3. Codegen: Generate code
+   - After this, signal "full interface"
+
+The early interface contains:
+- TyCons, Classes (from tcTyAndClassDecls)
+- Instance heads and DFun types (for instance resolution)
+- Type family instances
+- Exported function types (from tcTopSigs)
+- Fixities, warnings, annotations
+
+This allows dependent modules to start typechecking while the current module
+is still checking function bodies, improving parallelism beyond two-phase.
+-}
 
 tcHsBootSigs :: [(RecFlag, LHsBinds GhcRn)] -> [LSig GhcRn] -> TcM [Id]
 -- A hs-boot file has only one BindGroup, and it only has type

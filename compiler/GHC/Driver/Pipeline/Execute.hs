@@ -113,6 +113,8 @@ runPhase (T_HsPp pipe_env hsc_env origin_path inp_path) = do
 runPhase (T_HscRecomp pipe_env hsc_env fp hsc_src) = do
   runHscPhase pipe_env hsc_env fp hsc_src
 runPhase (T_Hsc hsc_env mod_sum) = runHscTcPhase hsc_env mod_sum
+runPhase (T_HscWithEarlySignal hsc_env mod_sum mb_callback) =
+  runHscTcPhaseWithEarlySignal hsc_env mod_sum mb_callback
 runPhase (T_HscPostTc hsc_env ms fer m mfi) =
   runHscPostTcPhase hsc_env ms fer m mfi
 runPhase (T_HscBackend pipe_env hsc_env mod_name hsc_src location x) = do
@@ -789,6 +791,14 @@ mkOneShotModLocation pipe_env dflags src_flavour mod_name = do
 
 runHscTcPhase :: HscEnv -> ModSummary -> IO (FrontendResult, Messages GhcMessage)
 runHscTcPhase = hscTypecheckAndGetWarnings
+
+-- | Like 'runHscTcPhase' but with an early signal callback for three-phase compilation.
+-- The callback is invoked after signatures are typechecked but before function bodies.
+-- See Note [Three-phase interface generation] in GHC.Tc.Gen.Bind
+runHscTcPhaseWithEarlySignal :: HscEnv -> ModSummary -> Maybe ((ModSummary, TcGblEnv) -> IO ())
+                             -> IO (FrontendResult, Messages GhcMessage)
+runHscTcPhaseWithEarlySignal hsc_env mod_sum mb_callback =
+  hscTypecheckAndGetWarningsWithEarlySignal hsc_env mod_sum mb_callback
 
 runHscPostTcPhase ::
     HscEnv

@@ -12,7 +12,8 @@ Main pass of renamer
 -}
 
 module GHC.Rename.Module (
-        rnSrcDecls, addTcgDUs, findSplice, rnWarningTxt, rnLWarningTxt
+        rnSrcDecls, addTcgDUs, findSplice, rnWarningTxt, rnLWarningTxt,
+        canSignalEarly
     ) where
 
 import GHC.Prelude hiding ( head )
@@ -36,7 +37,9 @@ import GHC.Rename.Names
 
 import GHC.Tc.Errors.Types
 import GHC.Tc.Utils.Monad
+import GHC.Tc.Types ( TcGblEnv(..) )
 import GHC.Tc.Types.Origin ( TypedThing(..) )
+import GHC.Types.Avail ( AvailInfo, availName )
 
 import GHC.Unit
 import GHC.Unit.Module.Warnings
@@ -2873,3 +2876,64 @@ add_bind _ (XValBindsLR {})     = panic "GHC.Rename.Module.add_bind"
 add_sig :: LSig (GhcPass a) -> HsValBinds (GhcPass a) -> HsValBinds (GhcPass a)
 add_sig s (ValBinds x bs sigs) = ValBinds x bs (s:sigs)
 add_sig _ (XValBindsLR {})     = panic "GHC.Rename.Module.add_sig"
+
+{- *********************************************************************
+*                                                                      *
+        Checking if early signaling is possible
+*                                                                      *
+********************************************************************* -}
+
+-- | Check if a module can use three-phase compilation with early interface signaling.
+-- Early signaling is possible when:
+--   1. All exported value bindings have explicit type signatures
+--   2. No Template Haskell splices that might affect types
+--   3. No type inference is needed for exports
+--
+-- This allows dependent modules to start typechecking after signatures are checked,
+-- but before function bodies are checked.
+-- See Note [Three-phase interface generation] in GHC.Tc.Gen.Bind
+canSignalEarly :: TcGblEnv    -- ^ After renaming, contains exports and sigs info
+               -> HsGroup GhcRn -- ^ Renamed source
+               -> Bool
+canSignalEarly tcg_env rn_group = all_exports_have_sigs && no_problematic_th
+  where
+    -- Get the set of exported names
+    exports = tcg_exports tcg_env
+    exported_names = mkNameSet [availName av | av <- availsToNameEnv exports]
+
+    -- Get names that have type signatures
+    val_sigs = case hs_valds rn_group of
+      XValBindsLR (NValBinds _ sigs) -> sigs
+      ValBinds _ _ sigs -> sigs
+    sig_names = getTypeSigNames val_sigs
+
+    -- Check if all exported value bindings have signatures
+    -- We only care about value bindings (functions), not types/classes
+    val_binds = case hs_valds rn_group of
+      XValBindsLR (NValBinds binds _) -> concatMap snd binds
+      ValBinds _ binds _ -> binds
+    bound_names = mkNameSet $ collectHsBindsBinders CollNoDictBinders val_binds
+
+    -- Exported value bindings that need signatures
+    exported_bindings = exported_names `intersectNameSet` bound_names
+
+    -- All exported bindings must have signatures for early signaling
+    all_exports_have_sigs = exported_bindings `subsetNameSet` sig_names
+
+    -- Check for problematic Template Haskell
+    -- If there are TH splices in type positions, we can't signal early
+    -- For now, conservatively disable early signaling if any TH is present
+    -- TODO: Be more precise about which TH splices are problematic
+    no_problematic_th = null (hs_splcds rn_group)
+
+-- | Helper: get names that have explicit type signatures
+getTypeSigNames :: [LSig GhcRn] -> NameSet
+getTypeSigNames sigs = mkNameSet [n | L _ (TypeSig _ ns _) <- sigs, L _ n <- ns]
+
+-- | Helper: convert avails to a NameEnv for quick lookup
+availsToNameEnv :: [AvailInfo] -> [AvailInfo]
+availsToNameEnv = id  -- Just return the list, we use availName directly
+
+-- | Helper to check subset relation on NameSets
+subsetNameSet :: NameSet -> NameSet -> Bool
+subsetNameSet small big = isEmptyNameSet (small `minusNameSet` big)

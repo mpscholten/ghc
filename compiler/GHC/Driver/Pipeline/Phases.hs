@@ -7,7 +7,7 @@ import GHC.Driver.DynFlags
 import GHC.Types.SourceFile
 import GHC.Unit.Module.ModSummary
 import GHC.Unit.Module.Status
-import GHC.Tc.Types ( FrontendResult )
+import GHC.Tc.Types ( FrontendResult, TcGblEnv )
 import GHC.Types.Error
 import GHC.Driver.Errors.Types
 import GHC.Fingerprint.Type
@@ -30,6 +30,10 @@ data TPhase res where
   T_HsPp  :: PipeEnv -> HscEnv -> FilePath -> FilePath -> TPhase FilePath
   T_HscRecomp :: PipeEnv -> HscEnv -> FilePath -> HscSource -> TPhase (HscEnv, ModSummary, HscRecompStatus)
   T_Hsc :: HscEnv -> ModSummary -> TPhase (FrontendResult, Messages GhcMessage)
+  -- | Like 'T_Hsc' but with an early signal callback for three-phase compilation.
+  -- The callback is invoked after signatures are typechecked but before bodies.
+  -- See Note [Three-phase interface generation] in GHC.Tc.Gen.Bind
+  T_HscWithEarlySignal :: HscEnv -> ModSummary -> Maybe ((ModSummary, TcGblEnv) -> IO ()) -> TPhase (FrontendResult, Messages GhcMessage)
   T_HscPostTc :: HscEnv -> ModSummary
               -> FrontendResult
               -> Messages GhcMessage

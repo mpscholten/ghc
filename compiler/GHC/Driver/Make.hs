@@ -70,6 +70,9 @@ import GHC.Driver.MakeAction
 import GHC.Iface.Load      ( cannotFindModule, readIface )
 import GHC.IfaceToCore     ( typecheckIface )
 import GHC.Iface.Recomp    ( RecompileRequired(..), CompileReason(..) )
+import GHC.Iface.Make      ( mkEarlyIface )
+import GHC.Tc.Types        ( TcGblEnv, tcg_inst_env )
+import GHC.Core.InstEnv    ( instEnvElts )
 
 import GHC.Data.Bag        ( listToBag )
 import GHC.Data.Graph.Directed
@@ -956,16 +959,25 @@ waitResult :: ResultVar a -> MaybeT IO a
 waitResult (ResultVar f var) = MaybeT (fmap f <$> readMVar var)
 
 -- | Result of building a module.
--- For two-phase compilation, we have separate signaling for:
--- 1. Partial interface ready (after typechecking) - allows dependents to start typechecking
--- 2. Full result ready (after codegen) - allows dependents to start codegen
--- See Note [Two-phase interface generation]
+-- For multi-phase compilation, we have separate signaling for:
+-- 1. Early interface ready (after signatures) - allows dependents to start typechecking earlier
+-- 2. Partial interface ready (after typechecking) - allows dependents to start typechecking
+-- 3. Full result ready (after codegen) - allows dependents to start codegen
+-- See Note [Two-phase interface generation] and Note [Three-phase interface generation]
 data BuildResult = BuildResult { _resultOrigin :: ResultOrigin
                                , resultVar    :: ResultVar (Maybe HomeModInfo)
                                -- ^ Full result, signaled after complete compilation
+                               , earlyIfaceVar :: Maybe (MVar (Maybe ModIface))
+                               -- ^ Early interface, signaled after type/class decls and signatures
+                               -- (before body checking). Only for three-phase compilation.
+                               -- See Note [Three-phase interface generation] in GHC.Tc.Gen.Bind
                                , partialIfaceVar :: Maybe (MVar (Maybe ModIface))
                                -- ^ Partial interface, signaled after typechecking (before codegen)
                                -- Nothing for non-module nodes (InstantiationNode, LinkNode, etc.)
+                               , hasInstancesVar :: Maybe (MVar Bool)
+                               -- ^ Whether this module defines instances. Set during early signal.
+                               -- Used to determine if dependents should skip three-phase.
+                               -- See Note [Three-phase instance detection]
                                }
 
 -- The origin of this result var, useful for debugging
@@ -973,8 +985,8 @@ data ResultOrigin = NoLoop | Loop ResultLoopOrigin deriving (Show)
 
 data ResultLoopOrigin = Initialise | Rehydrated | Finalised deriving (Show)
 
-mkBuildResult :: ResultOrigin -> ResultVar (Maybe HomeModInfo) -> Maybe (MVar (Maybe ModIface)) -> BuildResult
-mkBuildResult = BuildResult
+mkBuildResult :: ResultOrigin -> ResultVar (Maybe HomeModInfo) -> Maybe (MVar (Maybe ModIface)) -> Maybe (MVar (Maybe ModIface)) -> Maybe (MVar Bool) -> BuildResult
+mkBuildResult origin res_var early_var partial_var has_inst_var = BuildResult origin res_var early_var partial_var has_inst_var
 
 data BuildLoopState = BuildLoopState { buildDep :: M.Map NodeKey BuildResult
                                           -- The current way to build a specific TNodeKey, without cycles this just points to
@@ -984,6 +996,9 @@ data BuildLoopState = BuildLoopState { buildDep :: M.Map NodeKey BuildResult
                                      , bls_two_phase :: !Bool
                                           -- ^ Use two-phase interface signaling? Only useful for parallel builds.
                                           -- See Note [Two-phase interface generation]
+                                     , bls_three_phase :: !Bool
+                                          -- ^ Use three-phase interface signaling? Only useful for parallel builds.
+                                          -- See Note [Three-phase interface generation] in GHC.Tc.Gen.Bind
                                      }
 
 nodeId :: BuildM Int
@@ -1020,11 +1035,12 @@ interpretBuildPlan :: HomeUnitGraph
                    -> M.Map ModNodeKeyWithUid HomeModInfo
                    -> [BuildPlan]
                    -> Bool  -- ^ Use two-phase interface signaling (only useful for parallel builds)
+                   -> Bool  -- ^ Use three-phase interface signaling (experimental)
                    -> IO ( Maybe [ModuleGraphNode] -- Is there an unresolved cycle
                          , [MakeAction] -- Actions we need to run in order to build everything
                          , IO [Maybe (Maybe HomeModInfo)]) -- An action to query to get all the built modules at the end.
-interpretBuildPlan hug mhmi_cache old_hpt plan two_phase = do
-  ((mcycle, plans), build_map) <- runStateT (buildLoop plan) (BuildLoopState M.empty 1 two_phase)
+interpretBuildPlan hug mhmi_cache old_hpt plan two_phase three_phase = do
+  ((mcycle, plans), build_map) <- runStateT (buildLoop plan) (BuildLoopState M.empty 1 two_phase three_phase)
   let wait = collect_results (buildDep build_map)
   return (mcycle, plans, wait)
 
@@ -1083,12 +1099,21 @@ interpretBuildPlan hug mhmi_cache old_hpt plan two_phase = do
           !build_deps = getDependencies direct_deps build_map
       -- Create MVars before building the action so they can be captured
       res_var <- liftIO newEmptyMVar
-      -- For ModuleNode, create a partial interface MVar for two-phase compilation
-      -- Only create if two-phase signaling is enabled (parallel builds)
-      -- See Note [Two-phase interface generation]
+      -- For ModuleNode, create partial/early interface MVars for multi-phase compilation
+      -- See Note [Two-phase interface generation] and Note [Three-phase interface generation]
       two_phase <- gets bls_two_phase
+      three_phase <- gets bls_three_phase
       partial_iface_var <- case mod of
         ModuleNode {} | two_phase -> liftIO $ Just <$> newEmptyMVar
+        _ -> return Nothing
+      -- For three-phase, create early interface MVar (signals after signatures)
+      early_iface_var <- case mod of
+        ModuleNode {} | three_phase -> liftIO $ Just <$> newEmptyMVar
+        _ -> return Nothing
+      -- Track whether this module has instances (for three-phase detection)
+      -- See Note [Three-phase instance detection]
+      has_instances_var <- case mod of
+        ModuleNode {} | three_phase -> liftIO $ Just <$> newEmptyMVar
         _ -> return Nothing
 
       !build_action <-
@@ -1103,9 +1128,18 @@ interpretBuildPlan hug mhmi_cache old_hpt plan two_phase = do
                 let !old_hmi = M.lookup (mnKey ms) old_hpt
                     rehydrate_mods = mapMaybe nodeKeyModName <$> rehydrate_nodes
                 mod_idx <- nodeId
-                -- Create early signal callback for two-phase compilation
+                -- Create early signal callback for three-phase compilation
+                -- This signals after signatures but before body checking
+                -- See Note [Three-phase interface generation] in GHC.Tc.Gen.Bind
+                -- The callback receives TcGblEnv and creates an early ModIface from it
+                -- NOTE: The actual HscEnv is captured at call site in executeCompileNode
+                let early_signal_callback = case (early_iface_var, has_instances_var, ms) of
+                      (Just var, Just inst_var, ModuleNodeCompile modsummary) -> Just (var, inst_var, modsummary)
+                      _ -> Nothing
+                -- Create partial signal callback for two-phase compilation
+                -- This signals after full typechecking
                 -- See Note [Two-phase interface generation]
-                let early_signal_callback = case partial_iface_var of
+                let partial_signal_callback = case partial_iface_var of
                       Just var -> Just $ \partial_hmi -> do
                         -- Add early HomeModInfo to HUG FIRST, so dependents can look it up
                         -- as soon as they wake up. The HomeModInfo has proper ModDetails
@@ -1133,23 +1167,37 @@ interpretBuildPlan hug mhmi_cache old_hpt plan two_phase = do
                              )
                            ModuleNodeFixed _ _ -> (False, False)  -- Fixed modules are already compiled
                      let needs_full_deps = isJust rehydrate_mods || uses_th || uses_home_plugins
-                     if two_phase && not needs_full_deps
-                       then void $ wait_partial_ifaces build_deps
-                       else void $ wait_deps build_deps
-                     -- The 'finally' ensures partialIfaceVar is filled even on failure:
-                     -- - If compilation fails before early_signal_callback runs, we fill with Nothing
-                     -- - If early_signal_callback already ran, tryPutMVar is a no-op (MVar already full)
-                     -- - If compilation succeeds, the MVar was filled by the callback
+                     -- For three-phase, we could wait on early interfaces (even earlier start)
+                     -- BUT: if any dependency has instances, fall back to two-phase since
+                     -- early interfaces don't include instance info. See Note [Three-phase instance detection]
+                     -- For two-phase, wait for partial interfaces (earlier start than full)
+                     -- For single-threaded or needs_full_deps, wait for full results
+                     deps_have_instances <- if three_phase && not needs_full_deps
+                                              then anyDepHasInstances build_deps
+                                              else return False
+                     if three_phase && not needs_full_deps && not deps_have_instances
+                       then void $ wait_early_ifaces build_deps
+                       else if two_phase && not needs_full_deps
+                         then void $ wait_partial_ifaces build_deps
+                         else void $ wait_deps build_deps
+                     -- The 'finally' ensures MVars are filled even on failure:
+                     -- - If compilation fails before callbacks run, we fill with Nothing
+                     -- - If callbacks already ran, tryPutMVar is a no-op (MVar already full)
+                     -- - If compilation succeeds, the MVars were filled by the callbacks
                      -- This prevents dependents from blocking forever on a failed module.
                      -- See Note [Two-phase interface generation]
-                     hmi <- executeCompileNode mod_idx n_mods old_hmi hug rehydrate_mods ms early_signal_callback
-                       `MC.finally` (liftIO $ forM_ partial_iface_var $ \var -> void $ tryPutMVar var Nothing)
+                     hmi <- executeCompileNode mod_idx n_mods old_hmi hug rehydrate_mods ms early_signal_callback partial_signal_callback
+                       `MC.finally` (liftIO $ do
+                          forM_ partial_iface_var $ \var -> void $ tryPutMVar var Nothing
+                          forM_ early_iface_var $ \var -> void $ tryPutMVar var Nothing
+                          -- Fill hasInstancesVar with False on failure so dependents don't block
+                          forM_ has_instances_var $ \var -> void $ tryPutMVar var False)
                      -- Write the HMI to an external cache (if one exists)
                      -- See Note [Caching HomeModInfo]
                      liftIO $ forM mhmi_cache $ \hmi_cache -> addHmiToCache hmi_cache hmi
                      -- Add the full HomeModInfo to HUG. This intentionally replaces any
-                     -- partial HomeModInfo that was added by early_signal_callback during
-                     -- two-phase compilation. See Note [Two-phase interface generation].
+                     -- partial HomeModInfo that was added by callbacks during
+                     -- multi-phase compilation. See Note [Two-phase interface generation].
                      liftIO $ HUG.addHomeModInfoToHug hmi hug
                      return (Just hmi)
               LinkNode _nks uid -> do
@@ -1162,7 +1210,7 @@ interpretBuildPlan hug mhmi_cache old_hpt plan two_phase = do
 
 
       let result_var = mkResultVar res_var
-      setModulePipeline (mkNodeKey mod) (mkBuildResult origin result_var partial_iface_var)
+      setModulePipeline (mkNodeKey mod) (mkBuildResult origin result_var early_iface_var partial_iface_var has_instances_var)
       return $! (MakeAction build_action res_var)
 
 
@@ -1218,12 +1266,12 @@ interpretBuildPlan hug mhmi_cache old_hpt plan two_phase = do
 
           update_module_pipeline (m, i) =
             case gwib_isBoot m of
-              -- No partial interface signaling for rehydration - pass Nothing
-              NotBoot -> setModulePipeline (gwib_mod m) (mkBuildResult (Loop origin) (fanout i) Nothing)
+              -- No early/partial interface signaling for rehydration - pass Nothing for both
+              NotBoot -> setModulePipeline (gwib_mod m) (mkBuildResult (Loop origin) (fanout i) Nothing Nothing Nothing)
               IsBoot -> do
-                setModulePipeline (gwib_mod m) (mkBuildResult (Loop origin) (fanout i) Nothing)
+                setModulePipeline (gwib_mod m) (mkBuildResult (Loop origin) (fanout i) Nothing Nothing Nothing)
                 -- SPECIAL: Anything outside the loop needs to see A rather than A.hs-boot
-                setModulePipeline (boot_key (gwib_mod m)) (mkBuildResult (Loop origin) (fanout i) Nothing)
+                setModulePipeline (boot_key (gwib_mod m)) (mkBuildResult (Loop origin) (fanout i) Nothing Nothing Nothing)
 
       let deps_i = zip deps [0..]
       mapM update_module_pipeline deps_i
@@ -1257,7 +1305,13 @@ upsweep n_jobs hsc_env hmi_cache diag_wrapper mHscMessage old_hpt build_plan = d
     let two_phase = case n_jobs of
           NumProcessorsLimit n -> n > 1
           JSemLimit {} -> True  -- Assume parallel for job server
-    (cycle, pipelines, collect_result) <- interpretBuildPlan (hsc_HUG hsc_env) hmi_cache old_hpt build_plan two_phase
+    -- Three-phase enables even earlier interface signaling (after signatures, before bodies)
+    -- This is controlled by the -fthree-phase-iface flag (default: off).
+    -- Early interfaces are created with EarlyIface mode which skips DFun fingerprint
+    -- dependencies, allowing the interface to be generated before instance bodies are
+    -- typechecked. See Note [Three-phase interface generation] in GHC.Tc.Gen.Bind
+    let three_phase = two_phase && gopt Opt_ThreePhaseIface (hsc_dflags hsc_env)
+    (cycle, pipelines, collect_result) <- interpretBuildPlan (hsc_HUG hsc_env) hmi_cache old_hpt build_plan two_phase three_phase
     runPipelines n_jobs hsc_env diag_wrapper mHscMessage pipelines
     res <- collect_result
     let sec = initSourceErrorContext (hsc_dflags hsc_env)
@@ -1292,20 +1346,24 @@ upsweep_inst hsc_env mHscMessage mod_index nmods uid iuid = do
 
 -- | Compile a single module. Always produce a Linkable for it if
 -- successful. If no compilation happened, return the old Linkable.
--- The optional early signal callback is invoked after typechecking completes,
--- allowing dependent modules to start earlier.
+-- For three-phase compilation, the early signal callback is invoked after
+-- signatures are typechecked (before bodies). For two-phase, the partial
+-- signal callback is invoked after full typechecking (before codegen).
 -- See Note [Two-phase interface generation]
+-- See Note [Three-phase interface generation] in GHC.Tc.Gen.Bind
 upsweep_mod :: HscEnv
             -> Maybe Messager
             -> Maybe HomeModInfo
             -> ModSummary
             -> Int  -- index of module
             -> Int  -- total number of modules
-            -> Maybe (HomeModInfo -> IO ())  -- ^ callback for early interface signal
+            -> Maybe ((ModSummary, TcGblEnv) -> IO ())  -- ^ early signal callback (three-phase)
+            -> Maybe (HomeModInfo -> IO ())   -- ^ partial signal callback (two-phase)
             -> IO HomeModInfo
-upsweep_mod hsc_env mHscMessage old_hmi summary mod_index nmods mb_early_signal = do
-  compileOneWithEarlySignal mHscMessage hsc_env summary
-              mod_index nmods (hm_iface <$> old_hmi) (maybe emptyHomeModInfoLinkable hm_linkable old_hmi) mb_early_signal
+upsweep_mod hsc_env mHscMessage old_hmi summary mod_index nmods mb_early_signal mb_partial_signal = do
+  compileOneWithThreePhaseSignal mHscMessage hsc_env summary
+              mod_index nmods (hm_iface <$> old_hmi) (maybe emptyHomeModInfoLinkable hm_linkable old_hmi)
+              mb_early_signal mb_partial_signal
 
 
 -- Note [When source is considered modified]
@@ -1639,28 +1697,32 @@ executeInstantiationNode k n deps uid iu = do
 --    and artifacts from disk.
 
 -- | Execute the compilation of a module node.
--- The optional early signal callback is invoked after typechecking completes,
--- allowing dependent modules to start earlier.
+-- The optional partial signal callback is invoked after typechecking completes,
+-- allowing dependent modules to start earlier (two-phase compilation).
+-- The optional early signal info is used for three-phase compilation, where
+-- the callback is invoked even earlier (after signatures, before bodies).
 -- See Note [Two-phase interface generation]
+-- See Note [Three-phase interface generation] in GHC.Tc.Gen.Bind
 executeCompileNode :: Int
   -> Int
   -> Maybe HomeModInfo
   -> HomeUnitGraph
   -> Maybe [ModuleName] -- List of modules we need to rehydrate before compiling
   -> ModuleNodeInfo
-  -> Maybe (HomeModInfo -> IO ())  -- ^ Optional early interface signal callback
+  -> Maybe (MVar (Maybe ModIface), MVar Bool, ModSummary)  -- ^ Early signal info for three-phase (iface var, instances var, modsummary)
+  -> Maybe (HomeModInfo -> IO ())  -- ^ Partial interface signal callback (two-phase)
   -> RunMakeM HomeModInfo
-executeCompileNode k n !old_hmi hug mrehydrate_mods mni mb_early_signal = do
+executeCompileNode k n !old_hmi hug mrehydrate_mods mni mb_early_info mb_partial_signal = do
   me@MakeEnv{..} <- ask
   -- Rehydrate any dependencies if this module had a boot file or is a signature file.
   lift $ MaybeT (withAbstractSem compile_sem $ withLoggerHsc k me $ \hsc_env -> do
      hsc_env' <- liftIO $ maybeRehydrateBefore (setHUG hug hsc_env) mni fixed_mrehydrate_mods
      case mni of
-       ModuleNodeCompile mod -> executeCompileNodeWithSource hsc_env' me mod mb_early_signal
+       ModuleNodeCompile mod -> executeCompileNodeWithSource hsc_env' me mod mb_early_info mb_partial_signal
        ModuleNodeFixed key loc -> do
          -- For fixed modules, signal the interface immediately since it's already compiled
          result <- executeCompileNodeFixed hsc_env' me key loc
-         forM_ result $ \hmi -> forM_ mb_early_signal $ \signal -> signal hmi
+         forM_ result $ \hmi -> forM_ mb_partial_signal $ \signal -> signal hmi
          return result
     )
 
@@ -1691,18 +1753,43 @@ executeCompileNode k n !old_hmi hug mrehydrate_mods mni mb_early_signal = do
             let hm_linkable = HomeModLinkable mb_bytecode mb_object
             return (HomeModInfo iface details hm_linkable)
 
-    executeCompileNodeWithSource :: HscEnv -> MakeEnv -> ModSummary -> Maybe (HomeModInfo -> IO ()) -> IO (Maybe HomeModInfo)
-    executeCompileNodeWithSource hsc_env MakeEnv{diag_wrapper, env_messager} mod mb_signal = do
+    executeCompileNodeWithSource :: HscEnv -> MakeEnv -> ModSummary
+                                 -> Maybe (MVar (Maybe ModIface), MVar Bool, ModSummary)  -- Early signal info (iface var, instances var, modsummary)
+                                 -> Maybe (HomeModInfo -> IO ())  -- Partial signal callback
+                                 -> IO (Maybe HomeModInfo)
+    executeCompileNodeWithSource hsc_env MakeEnv{diag_wrapper, env_messager} mod mb_early_info mb_partial_signal = do
      let -- Use the cached DynFlags which includes OPTIONS_GHC pragmas
          lcl_dynflags = ms_hspp_opts mod
      let lcl_hsc_env =
              -- Localise the hsc_env to use the cached flags
              hscSetFlags lcl_dynflags $
              hsc_env
+     -- Create the early signal callback for three-phase compilation
+     -- This is called during typechecking with the TcGblEnv after signatures are checked
+     let mb_early_signal_callback = case mb_early_info of
+           Just (var, inst_var, _) -> Just $ \(mod_sum, tcg_env) -> do
+             -- Create early interface and details from TcGblEnv (signatures only)
+             -- Note: mod_sum comes from the callback and has ms_parsed_mod set
+             -- Check if this module defines instances (for three-phase detection)
+             -- See Note [Three-phase instance detection]
+             let has_instances = not (null (instEnvElts (tcg_inst_env tcg_env)))
+             putMVar inst_var has_instances
+             (early_iface, early_details) <- mkEarlyIface lcl_hsc_env mod_sum tcg_env []
+             -- Create early HomeModInfo and add to HUG FIRST
+             -- This allows dependent modules to find the interface when they wake up
+             let early_hmi = HomeModInfo
+                   { hm_iface = early_iface
+                   , hm_details = early_details
+                   , hm_linkable = emptyHomeModInfoLinkable
+                   }
+             HUG.addHomeModInfoToHug early_hmi hug
+             -- Signal that early interface is ready AFTER updating HUG
+             putMVar var (Just early_iface)
+           Nothing -> Nothing
      -- Compile the module, locking with a semaphore to avoid too many modules
      -- being compiled at the same time leading to high memory usage.
      wrapAction diag_wrapper lcl_hsc_env $ do
-      res <- upsweep_mod lcl_hsc_env env_messager old_hmi mod k n mb_signal
+      res <- upsweep_mod lcl_hsc_env env_messager old_hmi mod k n mb_early_signal_callback mb_partial_signal
       cleanCurrentModuleTempFilesMaybe (hsc_logger hsc_env) (hsc_tmpfs hsc_env) lcl_dynflags
       return res
 
@@ -1974,6 +2061,66 @@ wait_partial_ifaces brs = do
         -- Fall back to waiting on the full result.
         mhmi <- lift $ waitResult (resultVar br)
         return $ hm_iface <$> mhmi
+
+-- | Wait for early interfaces (after signature checking) of dependencies to be ready.
+-- This allows dependent modules to start typechecking even earlier than two-phase.
+-- See Note [Three-phase interface generation] in GHC.Tc.Gen.Bind
+--
+-- For dependencies with earlyIfaceVar, waits on the early interface.
+-- For dependencies without, falls back to wait_partial_ifaces behavior.
+wait_early_ifaces :: [BuildResult] -> RunMakeM [ModIface]
+wait_early_ifaces brs = do
+  results <- mapM waitOne brs
+  return $ catMaybes results
+  where
+    waitOne :: BuildResult -> RunMakeM (Maybe ModIface)
+    waitOne br = case earlyIfaceVar br of
+      Just var -> liftIO $ readMVar var
+      Nothing -> case partialIfaceVar br of
+        -- Fall back to partial interface if no early interface
+        Just var -> liftIO $ readMVar var
+        Nothing -> do
+          -- Fall back to full result
+          mhmi <- lift $ waitResult (resultVar br)
+          return $ hm_iface <$> mhmi
+
+-- | Check if any dependency has instances defined.
+-- Used to decide whether three-phase compilation can be used for a module.
+-- If any dependency has instances, we must use two-phase instead since
+-- early interfaces don't include instance info (they use emptyInstEnv).
+-- See Note [Three-phase instance detection]
+anyDepHasInstances :: [BuildResult] -> RunMakeM Bool
+anyDepHasInstances brs = liftIO $ do
+  results <- mapM checkOne brs
+  return $ or results
+  where
+    checkOne :: BuildResult -> IO Bool
+    checkOne br = case hasInstancesVar br of
+      Just var -> readMVar var
+      Nothing -> return False  -- No instance tracking = no instances
+
+{- Note [Three-phase instance detection]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Three-phase compilation signals an early interface after type/class declarations
+and signatures are checked but before function bodies are typechecked.
+This early interface is missing instance bodies (DFuns) since those are only
+available after tcInstDecls2.
+
+When a module A depends on module B that defines instances, module A needs
+those instances for instance resolution during typechecking. Since the early
+interface doesn't include proper instance info (it uses emptyInstEnv), module A
+cannot use three-phase compilation for dependencies that define instances.
+
+The hasInstancesVar tracks whether each module defines any instances.
+Before deciding to use three-phase, we check all dependencies. If any
+dependency has instances, we fall back to two-phase compilation which
+includes proper instance info in its partial interface.
+
+Detection is done at early signal time using:
+  let has_instances = not (null (instEnvElts (tcg_inst_env tcg_env)))
+  putMVar inst_var has_instances
+
+-}
 
 {- Note [Two-phase interface generation]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

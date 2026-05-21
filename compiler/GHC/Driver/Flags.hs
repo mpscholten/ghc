@@ -795,6 +795,7 @@ data GeneralFlag
    | Opt_ExposeInternalSymbols
    | Opt_KeepCAFs
    | Opt_KeepGoing
+   | Opt_ThreePhaseIface    -- ^ Enable three-phase interface signaling for parallel builds
    | Opt_ByteCode
    | Opt_ByteCodeAndObjectCode
    | Opt_UnoptimizedCoreForInterpreter

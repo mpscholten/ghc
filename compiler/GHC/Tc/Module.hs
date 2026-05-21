@@ -29,7 +29,9 @@ module GHC.Tc.Module (
         tcRnLookupName,
         tcRnGetInfo,
         tcRnModule, tcRnModuleTcRnM,
+        tcRnModuleWithEarlySignal,
         tcTopSrcDecls,
+        tcTopSrcDeclsWithEarlySignal,
         rnTopSrcDecls,
         checkBootDecl, checkHiBootIface',
         findExtraSigImports,
@@ -229,7 +231,44 @@ tcRnModule hsc_env mod_sum save_rn_syntax
       | otherwise   -- 'module M where' is omitted
       = mkHomeModule home_unit mAIN_NAME
 
+-- | Like 'tcRnModule' but with an early signal callback for three-phase compilation.
+-- The callback is invoked after type/class declarations and top-level signatures
+-- are typechecked, but before function bodies are checked.
+-- See Note [Three-phase interface generation] in GHC.Tc.Gen.Bind
+tcRnModuleWithEarlySignal :: HscEnv
+                          -> ModSummary
+                          -> Bool              -- True <=> save renamed syntax
+                          -> HsParsedModule
+                          -> Maybe ((ModSummary, TcGblEnv) -> IO ())  -- Early signal callback (runs in IO)
+                          -> IO (Messages TcRnMessage, Maybe TcGblEnv)
+tcRnModuleWithEarlySignal hsc_env mod_sum save_rn_syntax
+   parsedModule@HsParsedModule {hpm_module= L loc this_module}
+   mb_early_signal
+ | RealSrcSpan real_loc _ <- loc
+ = withTiming logger
+              (text "Renamer/typechecker"<+>brackets (ppr this_mod))
+              (const ()) $
+   initTc hsc_env hsc_src save_rn_syntax this_mod real_loc $
+          -- Convert IO callback to TcM callback, passing mod_sum which has ms_parsed_mod set
+          let mb_tcm_callback = fmap (\io_cb tcg_env -> liftIO (io_cb (mod_sum, tcg_env))) mb_early_signal
+          in tcRnModuleTcRnMWithEarlySignal hsc_env mod_sum parsedModule this_mod mb_tcm_callback
 
+  | otherwise
+  = return (err_msg `addMessage` emptyMessages, Nothing)
+
+  where
+    hsc_src = ms_hsc_src mod_sum
+    logger  = hsc_logger hsc_env
+    home_unit = hsc_home_unit hsc_env
+    err_msg = mkPlainErrorMsgEnvelope loc $
+              TcRnModMissingRealSrcSpan this_mod
+
+    this_mod
+      | Just (L _ mod) <- hsmodName this_module
+      = mkHomeModule home_unit mod
+
+      | otherwise   -- 'module M where' is omitted
+      = mkHomeModule home_unit mAIN_NAME
 
 
 tcRnModuleTcRnM :: HscEnv
@@ -359,6 +398,108 @@ tcRnModuleTcRnM hsc_env mod_sum
                         $ do { tcg_env <- runTypecheckerPlugin mod_sum tcg_env
                              ; -- Dump output and return
                                tcDump tcg_env
+                             ; return tcg_env
+                             }
+                      }
+               }
+        }
+      }
+
+-- | Like 'tcRnModuleTcRnM' but with an early signal callback for three-phase compilation.
+-- The callback is invoked after type/class declarations and top-level signatures
+-- are typechecked, but before function bodies are checked.
+-- See Note [Three-phase interface generation] in GHC.Tc.Gen.Bind
+tcRnModuleTcRnMWithEarlySignal :: HscEnv
+                               -> ModSummary
+                               -> HsParsedModule
+                               -> Module
+                               -> Maybe (TcGblEnv -> TcM ())  -- Early signal callback (in TcM)
+                               -> TcRn TcGblEnv
+tcRnModuleTcRnMWithEarlySignal hsc_env mod_sum
+                (HsParsedModule {
+                   hpm_module =
+                      (L loc (HsModule (XModulePs _ _ mod_deprec maybe_doc_hdr)
+                                       maybe_mod export_ies import_decls local_decls)),
+                   hpm_src_files = src_files
+                })
+                this_mod
+                mb_early_signal
+ = setSrcSpan loc $
+   do { let { explicit_mod_hdr = isJust maybe_mod
+            ; hsc_src          = ms_hsc_src mod_sum }
+      ; tcg_env <- getGblEnv
+      ; boot_info <- tcHiBootIface hsc_src this_mod
+      ; setGblEnv (tcg_env { tcg_self_boot = boot_info })
+        $ do
+        { implicit_prelude <- xoptM LangExt.ImplicitPrelude
+        ; let { prel_imports = mkPrelImports (moduleName this_mod) implicit_prelude import_decls }
+
+        ; when (notNull prel_imports) $ do
+            addDiagnostic TcRnImplicitImportOfPrelude
+
+        ; let { simplifyImport (L _ idecl) =
+                  ( renameRawPkgQual (hsc_unit_env hsc_env) (unLoc $ ideclName idecl) (ideclPkgQual idecl)
+                  , reLoc $ ideclName idecl)
+              }
+        ; raw_sig_imports <- liftIO
+                             $ findExtraSigImports hsc_env hsc_src
+                                 (moduleName this_mod)
+        ; raw_req_imports <- liftIO
+                             $ implicitRequirements hsc_env
+                                (map simplifyImport (prel_imports
+                                                     ++ import_decls))
+        ; let { mkImport mod_name = noLocA
+                $ (simpleImportDecl mod_name)
+                  { ideclImportList = Just (Exactly, noLocA [])}}
+        ; let { withReason t imps = map (,text t) imps }
+        ; let { all_imports = withReason "is implicitly imported" prel_imports
+                  ++ withReason "is directly imported" import_decls
+                  ++ withReason "is an extra sig import" (map mkImport raw_sig_imports)
+                  ++ withReason "is an implicit req import" (map mkImport raw_req_imports) }
+        ; (defaultImportsByClass, tcg_env) <-
+            {-# SCC "tcRnImports" #-} tcRnImports hsc_env all_imports
+
+        ; tcg_env <- return (tcg_env
+                              { tcg_hdr_info = (fmap (\(WithHsDocIdentifiers str _) -> WithHsDocIdentifiers str [])
+                                                <$> maybe_doc_hdr , maybe_mod ) })
+        ; tcg_env1 <- case mod_deprec of
+                             Just (L _ txt) -> do { txt' <- rnWarningTxt txt
+                                                  ; pure $ tcg_env {tcg_warns = WarnAll txt'}
+                                                  }
+                             Nothing            -> pure tcg_env
+        ; setGblEnv tcg_env1
+          $ do { traceRn "rn1a" empty
+               ; tcg_env <-
+                   case hsc_src of
+                    _ | tcg_mod tcg_env1 == gHC_PRIM -> pure tcg_env1
+
+                    HsBootOrSig boot_or_sig ->
+                      do { tcg_env <- tcRnHsBootDecls boot_or_sig local_decls
+                         ; traceRn "rn4a: before exports" empty
+                         ; tcg_env <- setGblEnv tcg_env $
+                                      rnExports explicit_mod_hdr export_ies
+                         ; traceRn "rn4b: after exports" empty
+                         ; return tcg_env
+                         }
+                    HsSrcFile ->
+                      -- For source files, use the early signal variant
+                      {-# SCC "tcRnSrcDecls" #-}
+                        tcRnSrcDeclsWithEarlySignal explicit_mod_hdr export_ies local_decls mb_early_signal
+
+               ; whenM (goptM Opt_DoCoreLinting) $
+                 lintGblEnv (hsc_logger hsc_env) (hsc_dflags hsc_env) tcg_env
+
+               ; setGblEnv tcg_env
+                 $ do { tcg_env <- checkHiBootIface tcg_env boot_info
+                      ; reportUnusedNames tcg_env hsc_src
+                      ; reportClashingDefaultImports defaultImportsByClass (tcg_default tcg_env)
+                      ; maybe_doc_hdr <- traverse rnLHsDoc maybe_doc_hdr;
+                      ; tcg_env <- return (tcg_env
+                                            { tcg_hdr_info = (maybe_doc_hdr, maybe_mod) })
+                      ; addDependentFiles src_files
+                      ; setGblEnv tcg_env
+                        $ do { tcg_env <- runTypecheckerPlugin mod_sum tcg_env
+                             ; tcDump tcg_env
                              ; return tcg_env
                              }
                       }
@@ -547,9 +688,21 @@ tcRnSrcDecls :: Bool  -- False => no 'module M(..) where' header at all
              -> Maybe (LocatedLI [LIE GhcPs])
              -> [LHsDecl GhcPs]               -- Declarations
              -> TcM TcGblEnv
-tcRnSrcDecls explicit_mod_hdr export_ies decls
+tcRnSrcDecls explicit_mod_hdr export_ies decls =
+  tcRnSrcDeclsWithEarlySignal explicit_mod_hdr export_ies decls Nothing
+
+-- | Like 'tcRnSrcDecls' but with an optional early signal callback.
+-- The callback is invoked after type/class declarations and top-level
+-- signatures are typechecked, but before function bodies are checked.
+-- See Note [Three-phase interface generation] in GHC.Tc.Gen.Bind
+tcRnSrcDeclsWithEarlySignal :: Bool  -- False => no 'module M(..) where' header at all
+                            -> Maybe (LocatedLI [LIE GhcPs])
+                            -> [LHsDecl GhcPs]               -- Declarations
+                            -> Maybe (TcGblEnv -> TcM ())    -- Early signal callback
+                            -> TcM TcGblEnv
+tcRnSrcDeclsWithEarlySignal explicit_mod_hdr export_ies decls mb_early_signal
  = do { -- Do all the declarations
-      ; (tcg_env, tcl_env, lie) <- tc_rn_src_decls decls
+      ; (tcg_env, tcl_env, lie) <- tc_rn_src_decls_with_early_signal decls mb_early_signal
 
       ------ Simplify constraints ---------
       --
@@ -694,10 +847,16 @@ run_th_modfinalizers = do
 
 tc_rn_src_decls :: [LHsDecl GhcPs]
                 -> TcM (TcGblEnv, TcLclEnv, WantedConstraints)
+tc_rn_src_decls ds = tc_rn_src_decls_with_early_signal ds Nothing
+
+-- | Like 'tc_rn_src_decls' but with an optional early signal callback.
 -- Loops around dealing with each top level inter-splice group
 -- in turn, until it's dealt with the entire module
 -- Never emits constraints; calls captureTopConstraints internally
-tc_rn_src_decls ds
+tc_rn_src_decls_with_early_signal :: [LHsDecl GhcPs]
+                                  -> Maybe (TcGblEnv -> TcM ())
+                                  -> TcM (TcGblEnv, TcLclEnv, WantedConstraints)
+tc_rn_src_decls_with_early_signal ds mb_early_signal
  = {-# SCC "tc_rn_src_decls" #-}
    do { (first_group, group_tail) <- findSplice ds
                 -- If ds is [] we get ([], Nothing)
@@ -743,9 +902,10 @@ tc_rn_src_decls ds
       -- NB: set the env **before** captureTopConstraints so that error messages
       -- get reported w.r.t. the right GlobalRdrEnv. It is for this reason that
       -- the captureTopConstraints must go here, not in tcRnSrcDecls.
+      -- For three-phase: pass the early signal callback to tcTopSrcDeclsWithEarlySignal
       ; ((tcg_env, tcl_env), lie1) <- setGblEnv tcg_env $
                                       captureTopConstraints $
-                                      tcTopSrcDecls rn_decls
+                                      tcTopSrcDeclsWithEarlySignal mb_early_signal rn_decls
 
         -- If there is no splice, we're nearly done
       ; restoreEnvs (tcg_env, tcl_env) $
@@ -753,6 +913,9 @@ tc_rn_src_decls ds
           { Nothing -> return (tcg_env, tcl_env, lie1)
 
             -- If there's a splice, we must carry on
+            -- NOTE: For splices, we don't pass the early signal callback
+            -- because we can only signal once, and we've already done it
+            -- for the first group (if the callback was provided)
           ; Just (SpliceDecl _ (L _ splice) _, rest_ds) ->
             do {
                  -- We need to simplify any constraints from the previous declaration
@@ -763,9 +926,10 @@ tc_rn_src_decls ds
                ; (spliced_decls, splice_fvs) <- rnTopSpliceDecls splice
 
                  -- Glue them on the front of the remaining decls and loop
+                 -- Don't pass early signal to subsequent groups
                ; setGblEnv (tcg_env `addTcgDUs` usesOnly splice_fvs) $
                  addTopEvBinds ev_binds1                             $
-                 tc_rn_src_decls (spliced_decls ++ rest_ds)
+                 tc_rn_src_decls_with_early_signal (spliced_decls ++ rest_ds) Nothing
                }
           }
       }
@@ -1698,15 +1862,27 @@ rnTopSrcDecls group
         return (tcg_env', rn_decls)
    }
 
+-- | Standard tcTopSrcDecls without early signaling callback
 tcTopSrcDecls :: HsGroup GhcRn -> TcM (TcGblEnv, TcLclEnv)
-tcTopSrcDecls (HsGroup { hs_tyclds = tycl_decls,
-                         hs_derivds = deriv_decls,
-                         hs_fords  = foreign_decls,
-                         hs_defds  = default_decls,
-                         hs_annds  = annotation_decls,
-                         hs_ruleds = rule_decls,
-                         hs_valds  = hs_val_binds@(XValBindsLR
-                                              (NValBinds val_binds val_sigs)) })
+tcTopSrcDecls = tcTopSrcDeclsWithEarlySignal Nothing
+
+-- | Typecheck top-level source declarations with optional early signal callback.
+-- The callback is invoked after type/class/instance declarations and top-level
+-- signatures are typechecked, but before function bodies are checked.
+-- This allows signaling an "early interface" for three-phase compilation.
+-- See Note [Three-phase interface generation] in GHC.Tc.Gen.Bind
+tcTopSrcDeclsWithEarlySignal :: Maybe (TcGblEnv -> TcM ())  -- ^ Early signal callback
+                             -> HsGroup GhcRn
+                             -> TcM (TcGblEnv, TcLclEnv)
+tcTopSrcDeclsWithEarlySignal mb_early_signal
+  (HsGroup { hs_tyclds = tycl_decls,
+             hs_derivds = deriv_decls,
+             hs_fords  = foreign_decls,
+             hs_defds  = default_decls,
+             hs_annds  = annotation_decls,
+             hs_ruleds = rule_decls,
+             hs_valds  = hs_val_binds@(XValBindsLR
+                                  (NValBinds val_binds val_sigs)) })
  = do {         -- Type-check the type and class decls, and all imported decls
                 -- The latter come in via tycl_decls
         traceTc "Tc2 (src)" empty ;
@@ -1727,12 +1903,38 @@ tcTopSrcDecls (HsGroup { hs_tyclds = tycl_decls,
         tcExtendGlobalValEnv fi_ids     $ do {
 
                 -- Value declarations next.
-                -- It is important that we check the top-level value bindings
-                -- before the GHC-generated derived bindings, since the latter
-                -- may be defined in terms of the former. (For instance,
-                -- the bindings produced in a Data instance.)
-        traceTc "Tc5" empty ;
-        tc_envs <- tcTopBinds val_binds val_sigs;
+                -- For three-phase compilation (when early signal is provided), we split
+                -- typechecking into signatures first, then bodies, with signaling in between.
+                -- Otherwise, use the standard tcTopBinds which is faster.
+        tc_envs <- (case mb_early_signal of
+          Nothing -> do {
+                -- Standard path: typecheck bindings all at once
+                traceTc "Tc5" empty ;
+                tcTopBinds val_binds val_sigs
+              }
+          Just signal -> do {
+                -- Three-phase path: split signature and body typechecking
+                -- Phase 1: Typecheck top-level signatures ONLY
+                traceTc "Tc5a (sigs)" empty ;
+                (sig_poly_ids, sig_fn, prag_fn) <- tcTopSigs val_binds val_sigs ;
+                -- Extend the environment with signature Ids
+                tcExtendSigIds TopLevel sig_poly_ids $ do {
+                -- Signal early interface AFTER type/class decls and signatures are checked
+                -- but BEFORE bodies are checked.
+                -- See Note [Three-phase interface generation] in GHC.Tc.Gen.Bind
+                tcg_env <- getGblEnv ;
+                -- Add sig_poly_ids to the type environment for the early interface.
+                -- tcExtendSigIds only extends the local environment (tcl_env), but
+                -- mkEarlyIface needs these Ids in tcg_type_env to create valid exports.
+                let { tcg_type_env' = extendTypeEnvWithIds (tcg_type_env tcg_env) sig_poly_ids
+                    ; tcg_env_with_sigs = tcg_env { tcg_type_env = tcg_type_env' } } ;
+                traceTc "Tc5b (early signal)" empty ;
+                signal tcg_env_with_sigs ;
+                -- Phase 2: Typecheck function bodies
+                traceTc "Tc5c (bodies)" empty ;
+                tcTopBodies val_binds val_sigs sig_poly_ids sig_fn prag_fn
+              }})
+          ;
         restoreEnvs tc_envs $ do {
 
                 -- Now GHC-generated derived bindings, generics, and selectors
@@ -1786,7 +1988,7 @@ tcTopSrcDecls (HsGroup { hs_tyclds = tycl_decls,
         return (tcg_env', tcl_env)
     }}}}}
 
-tcTopSrcDecls _ = panic "tcTopSrcDecls: ValBindsIn"
+tcTopSrcDeclsWithEarlySignal _ _ = panic "tcTopSrcDecls: ValBindsIn"
 
 ---------------------------
 tcTyClsInstDecls :: [TyClGroup GhcRn]

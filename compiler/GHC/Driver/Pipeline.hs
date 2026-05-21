@@ -19,7 +19,7 @@ module GHC.Driver.Pipeline (
 
    -- * Interfaces for the compilation manager (interpreted/batch-mode)
    preprocess,
-   compileOne, compileOne', compileOneWithEarlySignal,
+   compileOne, compileOne', compileOneWithEarlySignal, compileOneWithThreePhaseSignal,
    compileForeign, compileEmptyStub,
 
    -- * Linking
@@ -35,7 +35,8 @@ module GHC.Driver.Pipeline (
    -- * Constructing Pipelines
    TPipelineClass, MonadUse(..),
 
-   preprocessPipeline, fullPipeline, hscPipeline, hscPipelineWithEarlySignal, hscBackendPipeline, hscPostBackendPipeline,
+   preprocessPipeline, fullPipeline, hscPipeline, hscPipelineWithEarlySignal, hscPipelineWithThreePhaseSignal,
+   hscBackendPipeline, hscPostBackendPipeline,
    hscGenBackendPipeline, asPipeline, viaCPipeline, cmmCppPipeline, cmmPipeline, jsPipeline,
    llvmPipeline, llvmLlcPipeline, llvmManglePipeline, pipelineStart,
 
@@ -96,6 +97,7 @@ import qualified System.OsPath as SysOsPath
 
 import GHC.Iface.Make          ( mkFullIface )
 import GHC.Iface.Load          ( getGhcPrimIface )
+import GHC.Tc.Types             ( TcGblEnv )
 import GHC.Runtime.Loader      ( initializePlugins )
 
 
@@ -270,6 +272,93 @@ compileOneWithEarlySignal mHscMessage
    status <- hscRecompStatus mHscMessage plugin_hsc_env upd_summary
                 mb_old_iface mb_old_linkable (mod_index, nmods)
    let pipeline = hscPipelineWithEarlySignal pipe_env (setDumpPrefix pipe_env plugin_hsc_env, upd_summary, status) mb_early_signal
+   (iface, linkable) <- runPipeline (hsc_hooks plugin_hsc_env) pipeline
+   -- See Note [ModDetails and --make mode]
+   details <- initModDetails plugin_hsc_env iface
+   linkable' <- initWholeCoreBindings plugin_hsc_env iface details linkable
+   return $! HomeModInfo iface details linkable'
+
+ where lcl_dflags  = ms_hspp_opts summary
+       location    = ms_location summary
+       input_fn    = expectJust (ml_hs_file location)
+       input_fnpp  = ms_hspp_file summary
+
+       pipelineOutput = backendPipelineOutput bcknd
+
+       logger = hsc_logger hsc_env0
+       tmpfs  = hsc_tmpfs hsc_env0
+
+       basename = dropExtension input_fn
+
+       -- We add the directory in which the .hs files resides) to the import
+       -- path.  This is needed when we try to compile the .hc file later, if it
+       -- imports a _stub.h file that we created here.
+       current_dir = takeDirectory basename
+       old_paths   = includePaths lcl_dflags
+       loadAsByteCode
+         | Just Target { targetAllowObjCode = obj } <- findTarget summary (hsc_targets hsc_env0)
+         , not obj
+         = True
+         | otherwise = False
+       -- Figure out which backend we're using
+       (bcknd, dflags3)
+         -- #8042: When module was loaded with `*` prefix in ghci, but DynFlags
+         -- suggest to generate object code (which may happen in case -fobject-code
+         -- was set), force it to generate byte-code. This is NOT transitive and
+         -- only applies to direct targets.
+         | loadAsByteCode
+         = ( bytecodeBackend
+           , gopt_set (lcl_dflags { backend = bytecodeBackend }) Opt_ForceRecomp
+           )
+
+         | otherwise
+         = (backend dflags, lcl_dflags)
+       -- See Note [Filepaths and Multiple Home Units]
+       dflags  = dflags3 { includePaths = offsetIncludePaths dflags3 $ addImplicitQuoteInclude old_paths [current_dir] }
+       upd_summary = summary { ms_hspp_opts = dflags }
+       hsc_env = hscSetFlags dflags hsc_env0
+
+-- | Like 'compileOneWithEarlySignal' but with THREE-phase signaling:
+--   1. Early signal: after signatures checked (before body checking)
+--   2. Partial signal: after full typechecking (before codegen)
+--   3. Full result: after codegen
+--
+-- See Note [Three-phase interface generation] in GHC.Tc.Gen.Bind
+compileOneWithThreePhaseSignal
+            :: Maybe Messager
+            -> HscEnv
+            -> ModSummary      -- ^ summary for module being compiled
+            -> Int             -- ^ module N ...
+            -> Int             -- ^ ... of M
+            -> Maybe ModIface  -- ^ old interface, if we have one
+            -> HomeModLinkable
+            -> Maybe ((ModSummary, TcGblEnv) -> IO ())  -- ^ early signal callback (after sigs)
+            -> Maybe (HomeModInfo -> IO ())   -- ^ partial signal callback (after TC)
+            -> IO HomeModInfo   -- ^ the complete HomeModInfo, if successful
+
+compileOneWithThreePhaseSignal mHscMessage
+            hsc_env0 summary mod_index nmods mb_old_iface mb_old_linkable
+            mb_early_signal mb_partial_signal
+ = do
+
+   debugTraceMsg logger 2 (text "compile: input file" <+> text input_fnpp)
+
+   unless (gopt Opt_KeepHiFiles lcl_dflags) $
+             addFilesToClean tmpfs TFL_CurrentModule $
+                 [ml_hi_file $ ms_location summary]
+   unless (gopt Opt_KeepOFiles lcl_dflags) $
+             addFilesToClean tmpfs TFL_GhcSession $
+                 [ml_obj_file $ ms_location summary]
+
+   -- Initialise plugins here for any plugins enabled locally for a module.
+   plugin_hsc_env <- initializePlugins hsc_env
+   let pipe_env = mkPipeEnv NoStop input_fn Nothing pipelineOutput
+   status <- hscRecompStatus mHscMessage plugin_hsc_env upd_summary
+                mb_old_iface mb_old_linkable (mod_index, nmods)
+   -- Use three-phase pipeline with both early and partial signal callbacks
+   let pipeline = hscPipelineWithThreePhaseSignal pipe_env
+                    (setDumpPrefix pipe_env plugin_hsc_env, upd_summary, status)
+                    mb_early_signal mb_partial_signal
    (iface, linkable) <- runPipeline (hsc_hooks plugin_hsc_env) pipeline
    -- See Note [ModDetails and --make mode]
    details <- initModDetails plugin_hsc_env iface
@@ -887,6 +976,13 @@ hscPipeline pipe_env input = hscPipelineWithEarlySignal pipe_env input Nothing
 -- typechecking completes (before codegen). This allows signaling that the
 -- partial interface is ready, enabling dependent modules to start earlier.
 -- See Note [Two-phase interface generation] in GHC.Driver.Make
+--
+-- NOTE: For three-phase compilation, the callback is invoked after ALL
+-- typechecking (including bodies). To signal even earlier (after signatures
+-- but before bodies), see the infrastructure in GHC.Tc.Module:
+--   - tcTopSrcDeclsWithEarlySignal accepts a callback for early signaling
+--   - tcTopSigs and tcTopBodies split the TC pipeline
+-- See Note [Three-phase interface generation] in GHC.Tc.Gen.Bind
 hscPipelineWithEarlySignal :: P m
   => PipeEnv
   -> (HscEnv, ModSummary, HscRecompStatus)
@@ -911,6 +1007,52 @@ hscPipelineWithEarlySignal pipe_env (hsc_env_with_plugins, mod_sum, hsc_recomp_s
             -- Create early interface without codegen info (no CAF/LF info)
             early_iface <- mkFullIface hsc_env_with_plugins partial_iface Nothing Nothing NoStubs []
             -- Compute ModDetails so dependents can look up types
+            early_details <- initModDetails hsc_env_with_plugins early_iface
+            signal (HomeModInfo early_iface early_details emptyHomeModInfoLinkable)
+          HscUpdate iface -> do
+            details <- initModDetails hsc_env_with_plugins iface
+            signal (HomeModInfo iface details emptyHomeModInfoLinkable)
+      hscBackendPipeline pipe_env hsc_env_with_plugins mod_sum hscBackendAction
+
+-- | Like 'hscPipelineWithEarlySignal' but with THREE-phase signaling:
+--   1. Early signal: after signatures checked (before body checking)
+--   2. Partial signal: after full typechecking (before codegen)
+--   3. Full result: after codegen
+--
+-- The early signal allows dependent modules to start typechecking even earlier.
+-- See Note [Three-phase interface generation] in GHC.Tc.Gen.Bind
+--
+-- NOTE: The early signal is currently invoked AFTER full typechecking (same point
+-- as the partial signal) but with just the signature types. For true three-phase
+-- signaling where the early signal happens DURING typechecking (after signatures
+-- but before bodies), the TC pipeline would need to be called directly with
+-- tcRnModuleWithEarlySignal. This is a hook point for that future integration.
+hscPipelineWithThreePhaseSignal :: P m
+  => PipeEnv
+  -> (HscEnv, ModSummary, HscRecompStatus)
+  -> Maybe ((ModSummary, TcGblEnv) -> IO ())  -- ^ Early signal callback (called with ModSummary+TcGblEnv after sigs)
+  -> Maybe (HomeModInfo -> IO ())  -- ^ Partial signal callback (after typechecking)
+  -> m (ModIface, RecompLinkables)
+hscPipelineWithThreePhaseSignal pipe_env (hsc_env_with_plugins, mod_sum, hsc_recomp_status) mb_early_signal mb_partial_signal = do
+  case hsc_recomp_status of
+    HscUpToDate iface mb_linkable -> do
+      -- Module is up to date, signal partial interface
+      -- (early signal not applicable for up-to-date modules)
+      liftIO $ forM_ mb_partial_signal $ \signal -> do
+        details <- initModDetails hsc_env_with_plugins iface
+        signal (HomeModInfo iface details emptyHomeModInfoLinkable)
+      return (iface, mb_linkable)
+    HscRecompNeeded mb_old_hash -> do
+      -- Use T_HscWithEarlySignal to invoke the early callback DURING typechecking
+      -- (after signatures, before bodies). This is the key to three-phase signaling.
+      -- See Note [Three-phase interface generation] in GHC.Tc.Gen.Bind
+      (tc_result, warnings) <- use (T_HscWithEarlySignal hsc_env_with_plugins mod_sum mb_early_signal)
+      hscBackendAction <- use (T_HscPostTc hsc_env_with_plugins mod_sum tc_result warnings mb_old_hash)
+      -- Signal partial interface (same as two-phase)
+      liftIO $ forM_ mb_partial_signal $ \signal -> do
+        case hscBackendAction of
+          HscRecomp { hscs_partial_iface = partial_iface } -> do
+            early_iface <- mkFullIface hsc_env_with_plugins partial_iface Nothing Nothing NoStubs []
             early_details <- initModDetails hsc_env_with_plugins early_iface
             signal (HomeModInfo early_iface early_details emptyHomeModInfoLinkable)
           HscUpdate iface -> do

@@ -62,6 +62,7 @@ module GHC.Driver.Main
     , hscTypecheckRename
     , hscTypecheckRenameWithDiagnostics
     , hscTypecheckAndGetWarnings
+    , hscTypecheckAndGetWarningsWithEarlySignal
     , hscDesugar
     , makeSimpleDetails
     , hscSimplify -- ToDo, shouldn't really export this
@@ -662,6 +663,39 @@ hscTypecheckAndGetWarnings hsc_env summary = runHsc' hsc_env $ do
   case hscFrontendHook (hsc_hooks hsc_env) of
     Nothing -> FrontendTypecheck . fst <$> hsc_typecheck False summary Nothing
     Just h  -> h summary
+
+-- | Like 'hscTypecheckAndGetWarnings' but with an early signal callback
+-- for three-phase compilation. The callback is invoked after signatures
+-- are typechecked but before function bodies.
+-- See Note [Three-phase interface generation] in GHC.Tc.Gen.Bind
+hscTypecheckAndGetWarningsWithEarlySignal
+    :: HscEnv
+    -> ModSummary
+    -> Maybe ((ModSummary, TcGblEnv) -> IO ())  -- ^ Early signal callback (receives ModSummary with parsed module)
+    -> IO (FrontendResult, WarningMessages)
+hscTypecheckAndGetWarningsWithEarlySignal hsc_env summary mb_early_signal = do
+  -- For three-phase, we need to parse first then call tcRnModuleWithEarlySignal
+  case hscFrontendHook (hsc_hooks hsc_env) of
+    Just h  -> runHsc' hsc_env $ h summary  -- hooks bypass three-phase
+    Nothing -> do
+      -- Parse the module
+      ((hpm, _), msgs1) <- runHsc' hsc_env $ do
+        pm <- hscParse' summary
+        return (pm, ())
+      -- Update ModSummary with parsed module so mkEarlyIface can access export list
+      -- This is needed for three-phase compilation to handle re-exports correctly
+      let summary' = summary { ms_parsed_mod = Just hpm }
+      -- Typecheck with early signal callback - the callback will receive summary' with ms_parsed_mod set
+      (msgs2, mb_tc_result) <- tcRnModuleWithEarlySignal hsc_env summary' False hpm mb_early_signal
+      -- Combine messages: hoist TcRnMessage to GhcMessage
+      let msgs2' = fmap GhcTcRnMessage msgs2
+          all_msgs = msgs1 `mappend` msgs2'
+      case mb_tc_result of
+        Just tc_result -> return (FrontendTypecheck tc_result, all_msgs)
+        Nothing -> do
+          -- Typechecking failed - throw error messages so they are displayed
+          let sec = initSourceErrorContext (hsc_dflags hsc_env)
+          throwErrors sec all_msgs
 
 -- | A bunch of logic piled around @tcRnModule'@, concerning a) backpack
 -- b) concerning dumping rename info and hie files. It would be nice to further

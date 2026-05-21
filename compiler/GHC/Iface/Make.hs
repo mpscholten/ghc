@@ -13,6 +13,7 @@ module GHC.Iface.Make
    ( mkPartialIface
    , mkFullIface
    , mkIfaceTc
+   , mkEarlyIface
    , mkRecompUsageInfo
    , mkIfaceExports
    )
@@ -57,7 +58,11 @@ import GHC.Types.SafeHaskell
 import GHC.Types.Annotations
 import GHC.Types.Name
 import GHC.Types.Avail
-import GHC.Types.Name.Reader
+import GHC.Types.Name.Reader ( GlobalRdrEnv, GlobalRdrElt, RdrName,
+                               pickLevelZeroGRE, isLocalGRE,
+                               globalRdrEnvElts, globalRdrEnvLocal, gresToAvailInfo,
+                               lookupGRE, LookupGRE(..), WhichGREs(..),
+                               greName, availFromGRE )
 import GHC.Types.Name.Env
 import GHC.Types.Name.Set
 import GHC.Types.DefaultEnv ( ClassDefaults (..), DefaultEnv, defaultList )
@@ -67,6 +72,7 @@ import GHC.Types.SourceFile
 import GHC.Types.TyThing
 import GHC.Types.CompleteMatch
 import GHC.Types.Name.Cache
+import GHC.Types.SrcLoc ( unLoc )
 
 import GHC.Utils.Outputable
 import GHC.Utils.Panic
@@ -148,7 +154,7 @@ mkFullIface hsc_env partial_iface mb_stg_infos mb_cmm_infos stubs foreign_files 
 
     full_iface <-
       {-# SCC "addFingerprints" #-}
-      addFingerprints hsc_env $ set_mi_simplified_core mi_simplified_core $ set_mi_decls decls partial_iface
+      addFingerprints FullIface hsc_env $ set_mi_simplified_core mi_simplified_core $ set_mi_decls decls partial_iface
 
     -- Debug printing
     let unit_state = hsc_units hsc_env
@@ -259,6 +265,210 @@ mkIfaceTc hsc_env safe_mode mod_details mod_summary mb_program
                    mod_details
 
           mkFullIface hsc_env partial_iface Nothing Nothing NoStubs []
+
+-- | Make an "early interface" from partially typechecked results.
+-- This is called after type/class declarations and top-level signatures
+-- are typechecked, but BEFORE function bodies are checked.
+-- The early interface contains:
+--   - TyCons, Classes
+--   - Instance heads (for instance resolution)
+--   - Type family instances
+--   - Exported function types (from signatures)
+--   - Fixities, warnings
+-- But NOT:
+--   - Rules (need bodies)
+--   - Unfoldings (need bodies)
+--
+-- See Note [Three-phase interface generation] in GHC.Tc.Gen.Bind
+mkEarlyIface :: HscEnv
+             -> ModSummary
+             -> TcGblEnv           -- Partially typechecked environment
+             -> [Id]               -- Signature Ids from tcTopSigs
+             -> IO (ModIface, ModDetails)  -- Returns both interface and details
+mkEarlyIface hsc_env mod_summary
+  tc_result@TcGblEnv{ tcg_mod = this_mod,
+                      tcg_src = hsc_src,
+                      tcg_imports = imports,
+                      tcg_import_decls = import_decls,
+                      tcg_rdr_env = rdr_env,
+                      tcg_fix_env = fix_env,
+                      tcg_warns = warns,
+                      tcg_type_env = type_env,
+                      tcg_inst_env = inst_env,
+                      tcg_fam_inst_env = fam_inst_env,
+                      tcg_exports = exports,
+                      tcg_anns = anns,
+                      tcg_default = defaults,
+                      tcg_complete_matches = complete_matches
+                    }
+  sig_ids
+  = do
+          let pluginModules = map lpModule (loadedPlugins (hsc_plugins hsc_env))
+          let home_unit = hsc_home_unit hsc_env
+          let deps = mkDependencies home_unit
+                                    (tcg_mod tc_result)
+                                    (tcg_imports tc_result)
+                                    (map mi_module pluginModules)
+
+          -- For early interface, we don't need detailed usage info
+          -- since this is just for dependent modules to typecheck
+          let self_recomp = Nothing
+
+          -- Extract documentation if available
+          docs <- extractDocs (ms_hspp_opts mod_summary) tc_result
+
+          -- Build early ModDetails with:
+          -- - Type environment including TyCons, Classes, and signature Ids
+          -- - NO DFuns (their fingerprints haven't been computed yet)
+          -- - NO instances (they reference DFuns which aren't available)
+          -- - NO family instances (may depend on instance bodies)
+          -- - NO rules (need bodies)
+          --
+          -- Note: DFuns and instances are NOT included in the early interface because:
+          -- 1. Instance dictionary functions (DFuns) are Ids that need fingerprinting
+          -- 2. DFuns reference local bindings whose fingerprints haven't been computed
+          -- 3. Including instances without DFuns causes "lookupIdSubst" panics during desugar
+          -- 4. Even with EarlyIface fingerprint mode, we can't include the DFun Ids
+          -- Instances will be available in the partial interface after full TC.
+          --
+          -- The early interface is useful for modules that don't need instance resolution
+          -- from their dependencies (e.g., modules that only use types/data constructors).
+          --
+          -- Filter out DFuns from the type environment - they're created by
+          -- tcTyClsInstDecls but don't have fingerprints yet.
+          let isDFunThing (AnId id) = isDFunId id
+              isDFunThing _ = False
+              type_env_no_dfuns = filterNameEnv (not . isDFunThing) type_env
+              type_env_with_sigs = extendTypeEnvWithIds type_env_no_dfuns sig_ids
+
+              -- Compute exports from rdr_env when tcg_exports is empty.
+              -- At the early signal point, rnExports hasn't run yet, so tcg_exports
+              -- is [] (empty). We need to compute exports ourselves.
+              --
+              -- If the module has an explicit export list, we look up each exported
+              -- name in rdr_env to include both local definitions AND re-exports.
+              -- If there's no explicit export list, we export all local names.
+              -- See Note [Computing exports for early interface]
+              computed_exports
+                | null exports = computeEarlyExports mod_summary rdr_env
+                | otherwise    = exports
+
+              early_mod_details = ModDetails
+                { md_types     = type_env_with_sigs
+                , md_exports   = computed_exports
+                , md_insts     = emptyInstEnv  -- No instances in early interface (need DFuns)
+                , md_fam_insts = []            -- No family instances either
+                , md_rules     = []            -- No rules yet (need bodies)
+                , md_anns      = anns
+                , md_defaults  = defaults
+                , md_complete_matches = complete_matches
+                }
+
+          let partial_iface = mkIface_ hsc_env
+                   this_mod [] hsc_src  -- Empty CoreProgram
+                   deps rdr_env import_decls
+                   fix_env warns
+                   (imp_trust_own_pkg imports)
+                   Sf_Safe  -- Conservative safe mode for early interface
+                   self_recomp
+                   docs
+                   early_mod_details
+
+          -- Create early interface with EarlyIface mode (skips DFun fingerprints)
+          -- This is different from mkFullIface which uses FullIface mode.
+          -- See Note [Three-phase interface generation] in GHC.Tc.Gen.Bind
+          full_iface <- addFingerprints EarlyIface hsc_env partial_iface
+          let unit_state = hsc_units hsc_env
+          putDumpFileMaybe (hsc_logger hsc_env) Opt_D_dump_hi "EARLY INTERFACE" FormatText
+            (pprModIface unit_state full_iface)
+          final_iface <- shareIface (hsc_NC hsc_env) (flagsToIfCompression $ hsc_dflags hsc_env) full_iface
+          return (final_iface, early_mod_details)
+
+-- | Compute exports for early interface from parsed module and GlobalRdrEnv.
+-- If the module has an explicit export list, look up each exported name in rdr_env.
+-- If no explicit export list, export all local names.
+-- See Note [Computing exports for early interface]
+computeEarlyExports :: ModSummary -> GlobalRdrEnv -> [AvailInfo]
+computeEarlyExports mod_summary rdr_env =
+  case ms_parsed_mod mod_summary of
+    Nothing -> defaultExports  -- No parsed module, fall back to local exports
+    Just hpm ->
+      case hsmodExports (unLoc (hpm_module hpm)) of
+        Nothing -> defaultExports  -- No explicit export list, export all local names
+        Just lies -> exportsFromIEList (unLoc lies) rdr_env
+  where
+    -- Default: export all local top-level names
+    defaultExports = gresToAvailInfo
+                   . mapMaybe pickLevelZeroGRE
+                   . filter isLocalGRE
+                   . globalRdrEnvElts
+                   $ rdr_env
+
+-- | Compute exports from an explicit export list by looking up names in GlobalRdrEnv.
+-- This handles re-exports by including any name visible in rdr_env.
+exportsFromIEList :: [LIE GhcPs] -> GlobalRdrEnv -> [AvailInfo]
+exportsFromIEList ies rdr_env = concatMap (exportFromIE rdr_env) ies
+
+-- | Look up a single IE item in the GlobalRdrEnv and return its AvailInfo.
+exportFromIE :: GlobalRdrEnv -> LIE GhcPs -> [AvailInfo]
+exportFromIE rdr_env lie = case unLoc lie of
+  IEVar _ lwrapped _ ->
+    lookupExport (ieWrappedRdr (unLoc lwrapped))
+
+  IEThingAbs _ lwrapped _ ->
+    lookupExport (ieWrappedRdr (unLoc lwrapped))
+
+  IEThingAll _ lwrapped _ ->
+    lookupExportWithChildren (ieWrappedRdr (unLoc lwrapped))
+
+  IEThingWith _ lwrapped _ subs _ ->
+    lookupExportWithSubs (ieWrappedRdr (unLoc lwrapped)) subs
+
+  IEModuleContents _ lmod_name ->
+    let mod_name = unLoc lmod_name
+        gre_mod gre = case greDefinitionModule gre of
+                        Just m  -> moduleName m
+                        Nothing -> mod_name  -- Should not happen
+    in map availFromGRE
+       . mapMaybe pickLevelZeroGRE
+       . filter (\gre -> gre_mod gre == mod_name)
+       . globalRdrEnvElts
+       $ rdr_env
+
+  IEGroup {} -> []    -- Doc section, no export
+  IEDoc {} -> []      -- Doc string, no export
+  IEDocNamed {} -> [] -- Doc reference, no export
+
+  where
+    -- Extract RdrName from IEWrappedName
+    ieWrappedRdr :: IEWrappedName GhcPs -> RdrName
+    ieWrappedRdr (IEName _ lrdr) = unLoc lrdr
+    ieWrappedRdr (IEDefault _ lrdr) = unLoc lrdr
+    ieWrappedRdr (IEPattern _ lrdr) = unLoc lrdr
+    ieWrappedRdr (IEType _ lrdr) = unLoc lrdr
+    ieWrappedRdr (IEData _ lrdr) = unLoc lrdr
+
+    -- Look up an RdrName in GlobalRdrEnv and return its AvailInfo
+    lookupExport :: RdrName -> [AvailInfo]
+    lookupExport rdr =
+      let gres = lookupGRE rdr_env (LookupRdrName rdr (AllRelevantGREs))
+      in map availFromGRE gres
+
+    -- Look up with all children (T(..))
+    lookupExportWithChildren :: RdrName -> [AvailInfo]
+    lookupExportWithChildren rdr =
+      let gres = lookupGRE rdr_env (LookupRdrName rdr (AllRelevantGREs))
+      in map availFromGRE gres  -- TODO: include children
+
+    -- Look up with specific subordinates (T(x,y))
+    lookupExportWithSubs :: RdrName -> [LIEWrappedName GhcPs] -> [AvailInfo]
+    lookupExportWithSubs rdr _subs =
+      let gres = lookupGRE rdr_env (LookupRdrName rdr (AllRelevantGREs))
+      in map availFromGRE gres  -- TODO: include specific subs
+
+    -- Get the module where a GRE was defined
+    greDefinitionModule :: GlobalRdrElt -> Maybe Module
+    greDefinitionModule gre = nameModule_maybe (greName gre)
 
 mkRecompUsageInfo :: HscEnv -> TcGblEnv -> IO (Maybe [Usage])
 mkRecompUsageInfo hsc_env tc_result = do

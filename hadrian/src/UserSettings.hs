@@ -14,8 +14,11 @@ module UserSettings (
     verboseCommand, buildProgressColour, successColour, finalStage
     ) where
 
+import qualified Data.Set as Set
+
 import Flavour.Type
 import Expression
+import Oracles.Flag
 import {-# SOURCE #-} Settings.Default
 
 -- See doc/user-settings.md for instructions.
@@ -28,12 +31,41 @@ userDefaultFlavour = "default"
 
 -- | User-defined build flavours. See 'userFlavour' as an example.
 userFlavours :: [Flavour]
-userFlavours = [userFlavour] -- Add more build flavours if need be.
+userFlavours = [userFlavour, threePhaseFlavour] -- Add more build flavours if need be.
 
 -- | This is an example user-defined build flavour. Feel free to modify it and
 -- use by passing @--flavour=user@ from the command line.
 userFlavour :: Flavour
 userFlavour = defaultFlavour { name = "user" } -- Modify other settings here.
+
+-- | Three-phase flavour for benchmarking three-phase interface generation.
+-- Based on quick flavour but with -fthree-phase-iface enabled.
+-- Use with: ./hadrian/build --flavour=three-phase
+threePhaseFlavour :: Flavour
+threePhaseFlavour = defaultFlavour
+    { name = "three-phase"
+    , extraArgs = threePhaseArgs
+    -- Match quick flavour's libraryWays (no profiling)
+    , libraryWays = Set.fromList <$>
+                    mconcat
+                    [ pure [vanilla]
+                    , notStage0 ? platformSupportsSharedLibs ? pure [dynamic] ]
+    , rtsWays     = Set.fromList <$>
+                    mconcat
+                    [ pure [ vanilla, debug ]
+                    , targetSupportsThreadedRts ? pure [ threaded, threadedDebug ]
+                    , notStage0 ? platformSupportsSharedLibs ? pure [ dynamic, debugDynamic ]
+                    , notStage0 ? platformSupportsSharedLibs ? targetSupportsThreadedRts ? pure [
+                      threadedDynamic, threadedDebugDynamic ]
+                    ] }
+
+threePhaseArgs :: Args
+threePhaseArgs = sourceArgs SourceArgs
+    { hsDefault  = mconcat [ pure ["-O0", "-H64m"]
+                           , notStage0 ? pure ["-fthree-phase-iface"] ]
+    , hsLibrary  = notStage0 ? arg "-O"
+    , hsCompiler = stage0 ? arg "-O2"
+    , hsGhc      = stage0 ? arg "-O" }
 
 -- | Add user-defined packages. Note, this only lets Hadrian know about the
 -- existence of a new package; to actually build it you need to create a new
