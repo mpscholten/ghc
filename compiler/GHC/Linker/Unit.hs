@@ -23,9 +23,10 @@ import GHC.Utils.Panic
 import qualified GHC.Data.ShortText as ST
 
 import GHC.Settings
+import GHC.Platform
 
 import Control.Monad
-import Data.List (nub)
+import Data.List (nub, isPrefixOf)
 import Data.Semigroup ( Semigroup(..) )
 import System.Directory
 import System.FilePath
@@ -56,11 +57,31 @@ collectLinkOpts namever ways mExecutableLinkMode ps = do
   fmap mconcat $ forM ps $ \pc -> do
     extraLibs <- getExtraLibs pc
     pure UnitLinkOpts
-      { hsLibs     = map ("-l" ++) . unitHsLibs namever ways $ pc
+      { hsLibs     = map (mkLibFlag useLazyLoading) . unitHsLibs namever ways $ pc
       , extraLibs  = extraLibs
       , otherFlags = map ST.unpack . unitLinkerOptions $ pc
       }
  where
+  -- On macOS with dynamic linking, use lazy library loading for non-essential
+  -- libraries to improve startup time. Essential libraries (rts, base, ghc-prim,
+  -- ghc-bignum, ghc-internal) must load immediately as they're needed for
+  -- basic program initialization.
+  useLazyLoading = case mExecutableLinkMode of
+    Just (_, _, platform)
+      | platformOS platform == OSDarwin
+      , ways `hasWay` WayDyn -> True
+    _ -> False
+
+  -- Libraries that must load immediately (needed for basic initialization)
+  essentialLibs = ["HSrts", "HSbase", "HSghc-prim", "HSghc-bignum", "HSghc-internal"]
+
+  isEssentialLib lib = any (`isPrefixOf` lib) essentialLibs
+
+  mkLibFlag :: Bool -> String -> String
+  mkLibFlag lazy lib
+    | lazy, not (isEssentialLib lib) = "-lazy-l" ++ lib
+    | otherwise                       = "-l" ++ lib
+
   -- extra libs can be represented in different ways, depending on the platform and how we link:
   --   * static linking on most system: -l:libfoo.a -l:libbar.a
   --   * static linking on e.g. mac: /some/path/libfoo.a /some/path/libbar.a
