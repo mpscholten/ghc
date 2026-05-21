@@ -1,4 +1,5 @@
 {-# LANGUAGE MultiWayIf #-}
+{-# LANGUAGE TypeApplications #-}
 
 -- | External interpreter program
 module GHC.Runtime.Interpreter.C
@@ -21,7 +22,16 @@ import GHC.Utils.Panic.Plain
 import GHC.Linker.Executable
 import GHC.Linker.Config
 
--- | Generate iserv program for the target
+import GHC.Fingerprint (fingerprintString)
+import System.Directory (doesFileExist, createDirectoryIfMissing, getPermissions, executable, copyFile, setPermissions)
+import System.FilePath ((</>))
+import Control.Exception (try, SomeException)
+
+-- | Generate iserv program for the target.
+--
+-- The linked binary is cached based on the GHC libdir and ways so that
+-- subsequent GHC invocations with the same configuration can reuse it
+-- without re-linking (~1.3s savings on macOS).
 generateIservC :: DynFlags -> Logger -> TmpFs -> ExecutableLinkOpts -> UnitEnv -> IO FilePath
 generateIservC dflags logger tmpfs opts unit_env = do
   -- get the unit-id of the ghci package. We need this to load the
@@ -31,7 +41,47 @@ generateIservC dflags logger tmpfs opts unit_env = do
     Nothing -> cmdLineErrorIO "C interpreter: couldn't find \"ghci\" package"
     Just i  -> pure i
 
-  -- generate a temporary name for the iserv program
+  -- Compute the final ways for iserv (same logic as used below in opts')
+  let final_ways =
+        let ways = leWays opts
+            ways' = addWay WayThreaded ways
+        in if targetHasRTSWays dflags ways' then ways' else ways
+
+  -- Compute a deterministic cache key from the GHC installation and ways.
+  -- topDir uniquely identifies the GHC installation (includes nix store hash,
+  -- version-specific paths, etc.). Combined with ways and ghci unit-id,
+  -- this fully determines the iserv binary.
+  let cache_key = show $ fingerprintString $ concat
+        [ topDir dflags
+        , unitIdString ghci_unit_id
+        , show final_ways
+        ]
+  let cache_dir = "/tmp/ghc-iserv-cache"
+  let cache_file = cache_dir </> cache_key
+
+  -- Check if we have a cached iserv binary
+  cached <- iservCacheValid cache_file
+  if cached
+    then pure cache_file
+    else do
+      -- Link a fresh iserv binary
+      exe_file <- linkIserv dflags logger tmpfs opts unit_env ghci_unit_id final_ways
+
+      -- Store in cache for future invocations (best-effort, don't fail if
+      -- caching doesn't work, e.g. due to permissions)
+      _ <- try @SomeException $ do
+        createDirectoryIfMissing True cache_dir
+        copyFileToCache exe_file cache_file
+
+      -- Return the cached file if it was stored successfully, otherwise
+      -- fall back to the temp file
+      cached' <- iservCacheValid cache_file
+      pure (if cached' then cache_file else exe_file)
+
+-- | Link a fresh iserv binary and return its path
+linkIserv :: DynFlags -> Logger -> TmpFs -> ExecutableLinkOpts -> UnitEnv
+          -> UnitId -> Ways -> IO FilePath
+linkIserv _dflags logger tmpfs opts unit_env ghci_unit_id final_ways = do
   let tmpdir = leTempDir opts
   exe_file <- newTempName logger tmpfs tmpdir TFL_GhcSession "iserv"
 
@@ -62,10 +112,7 @@ generateIservC dflags logger tmpfs opts unit_env = do
         , leKeepCafs = True
 
           -- link with -threaded if target has threaded RTS
-        , leWays =
-            let ways = leWays opts
-                ways' = addWay WayThreaded ways
-            in if targetHasRTSWays dflags ways' then ways' else ways
+        , leWays = final_ways
 
           -- enable all rts options
         , leRtsOptsEnabled = RtsOptsAll
@@ -88,5 +135,23 @@ generateIservC dflags logger tmpfs opts unit_env = do
             -> leLinkerConfig opts
         }
   linkExecutable logger tmpfs opts' unit_env [] [ghci_unit_id]
-
   pure exe_file
+
+-- | Check if a cached iserv binary exists and is executable
+iservCacheValid :: FilePath -> IO Bool
+iservCacheValid path = do
+  exists <- doesFileExist path
+  if exists
+    then do
+      perms <- getPermissions path
+      pure (executable perms)
+    else pure False
+
+-- | Copy the linked iserv binary to the cache location, preserving
+-- executable permissions.
+copyFileToCache :: FilePath -> FilePath -> IO ()
+copyFileToCache src dst = do
+  copyFile src dst
+  -- Ensure the cached binary is executable
+  perms <- getPermissions dst
+  setPermissions dst (perms { executable = True })

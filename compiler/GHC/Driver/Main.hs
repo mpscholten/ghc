@@ -120,6 +120,7 @@ import GHC.Driver.Errors.Types
 import GHC.Driver.CodeOutput
 import GHC.Driver.Config.Cmm.Parser (initCmmParserConfig)
 import GHC.Driver.Config.Core.Opt.Simplify ( initSimplifyExprOpts )
+import GHC.Core.Map.Expr ( emptyCoreMap, lookupCoreMap, extendCoreMap )
 import GHC.Driver.Config.Core.Lint ( endPassHscEnvIO )
 import GHC.Driver.Config.Core.Lint.Interactive ( lintInteractiveExpr )
 import GHC.Driver.Config.CoreToStg
@@ -328,6 +329,7 @@ newHscEnvWithHUG top_dir top_dynflags cur_unit home_unit_graph = do
     let dflags = homeUnitEnv_dflags $ HUG.unitEnv_lookup cur_unit home_unit_graph
     unit_env <- initUnitEnv cur_unit home_unit_graph (ghcNameVersion dflags) (targetPlatform dflags)
     llvm_config <- initLlvmConfigCache top_dir
+    bco_cache <- newIORef emptyCoreMap
     return HscEnv { hsc_dflags         = top_dynflags
                   , hsc_logger         = setLogFlags logger (initLogFlags top_dynflags)
                   , hsc_targets        = []
@@ -341,6 +343,7 @@ newHscEnvWithHUG top_dir top_dynflags cur_unit home_unit_graph = do
                   , hsc_hooks          = emptyHooks
                   , hsc_tmpfs          = tmpfs
                   , hsc_llvm_config    = llvm_config
+                  , hsc_bco_cache      = bco_cache
                   }
 
 -- | Initialize HscEnv from an optional top_dir path
@@ -2775,9 +2778,46 @@ hscCompileCoreExpr hsc_env loc expr =
 
 hscCompileCoreExpr' :: HscEnv -> SrcSpan -> CoreExpr -> IO (ForeignHValue, [Linkable], PkgsLoaded)
 hscCompileCoreExpr' hsc_env srcspan ds_expr = do
+  -- Check the BCO cache first. If we've compiled an alpha-equivalent
+  -- Core expression before, reuse the result.
+  -- See Note [BCO Cache for TH splices].
+  cache <- readIORef (hsc_bco_cache hsc_env)
+  case lookupCoreMap cache ds_expr of
+    Just result -> return result
+    Nothing     -> do
+      result <- hscCompileCoreExpr'' hsc_env srcspan ds_expr
+      -- Store in cache for future lookups
+      modifyIORef' (hsc_bco_cache hsc_env) (\c -> extendCoreMap c ds_expr result)
+      return result
+
+{- Note [BCO Cache for TH splices]
+   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Each TH splice independently goes through the full pipeline:
+  desugar → simplify → tidy → CorePrep → STG → bytecode → load
+
+When the same TH function is applied repeatedly (e.g., 50 deriveJSON
+calls in a module, or repeated GHCi evaluations), the compiled bytecode
+for alpha-equivalent Core expressions is identical. The BCO cache avoids
+redundant compilation by caching the result keyed by the Core expression
+(using alpha-equivalence via CoreMap).
+
+On cache hit, we skip all compilation steps and return the previously
+compiled ForeignHValue directly.
+
+Cache invalidation: The cache must be cleared when the linking environment
+changes, e.g., on GHCi :reload. Otherwise, cached ForeignHValues may
+reference stale closures from the previous compilation. This is done in
+GHC.Driver.Make.load' before the upsweep begins.
+-}
+
+hscCompileCoreExpr'' :: HscEnv -> SrcSpan -> CoreExpr -> IO (ForeignHValue, [Linkable], PkgsLoaded)
+hscCompileCoreExpr'' hsc_env srcspan ds_expr = do
   {- Simplify it -}
-  -- Question: should we call SimpleOpt.simpleOptExpr here instead?
-  -- It is, well, simpler, and does less inlining etc.
+  -- The full simplifier is needed here (not just simpleOptExpr) because
+  -- GHCi expressions and TH splices may reference primop wrappers like
+  -- seq that must be inlined to avoid unresolvable bytecode linker symbols.
+  -- The BCO cache (see Note [BCO Cache for TH splices]) amortizes this cost
+  -- for repeated splice patterns.
   let dflags = hsc_dflags hsc_env
   let logger = hsc_logger hsc_env
   let ic = hsc_IC hsc_env

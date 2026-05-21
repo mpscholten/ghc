@@ -21,6 +21,8 @@ module GHCi.Message
   , THResult(..), THResultType(..)
   , ResumeContext(..)
   , QState(..)
+  , PrefetchedQuasiData(..)
+  , emptyPrefetchedQuasiData
   , getMessage, putMessage, getTHMessage, putTHMessage
   , Pipe, mkPipeFromHandles, mkPipeFromContinuations, remoteCall, remoteTHCall, readPipe, writePipe
   , BreakModule
@@ -63,6 +65,7 @@ import Data.Dynamic
 import Data.Typeable (TypeRep)
 import Data.IORef
 import Data.Map (Map)
+import qualified Data.Map as M
 import Foreign
 import GHC.Generics
 import GHC.Stack.CCS
@@ -211,11 +214,16 @@ data Message a where
   -- in it.  The TH types don't have NFData instances, and even if
   -- they did, we have to serialize the value anyway, so we might
   -- as well serialize it to force it.
+  --
+  -- The PrefetchedQuasiData contains pre-computed reification info
+  -- to avoid synchronous IPC round-trips for common Quasi operations.
+  -- See Note [Prefetched Quasi Data].
   RunTH
    :: RemoteRef (IORef QState)
    -> HValueRef {- e.g. TH.Q TH.Exp -}
    -> THResultType
    -> Maybe TH.Loc
+   -> PrefetchedQuasiData
    -> Message (QResult ByteString)
 
   -- | Run the given mod finalizers.
@@ -502,6 +510,44 @@ data THResultType = THExp | THPat | THType | THDec | THAnnWrapper
 
 instance Binary THResultType
 
+-- | Pre-computed reification data sent with RunTH to avoid
+-- synchronous IPC round-trips for common Quasi operations like
+-- qReify, qReifyType, and qReifyFixity.
+-- See Note [Prefetched Quasi Data] below.
+data PrefetchedQuasiData = PrefetchedQuasiData
+  { pqdReify        :: Map TH.Name TH.Info
+  , pqdReifyType    :: Map TH.Name TH.Type
+  , pqdReifyFixity  :: Map TH.Name (Maybe TH.Fixity)
+  }
+  deriving (Generic, Show)
+
+instance Binary PrefetchedQuasiData
+
+-- | Empty prefetch data (no cache entries).
+emptyPrefetchedQuasiData :: PrefetchedQuasiData
+emptyPrefetchedQuasiData = PrefetchedQuasiData
+  { pqdReify      = M.empty
+  , pqdReifyType  = M.empty
+  , pqdReifyFixity = M.empty
+  }
+
+{- Note [Prefetched Quasi Data]
+   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+When running a TH splice via RunTH, the splice code often calls qReify,
+qReifyType, and qReifyFixity which each trigger a synchronous IPC round-trip
+from iserv back to GHC (~5-7ms each). For splices like deriveJSON or
+makeLenses that make 5-10+ such calls, this adds 25-50ms+ per splice.
+
+To avoid these round-trips, before sending RunTH we pre-compute reification
+info for names reachable from the splice expression's free variables, and
+send it as a PrefetchedQuasiData payload. On the iserv side, the Quasi
+GHCiQ instance checks this local cache before falling back to IPC.
+
+If a splice asks for something not in the prefetch (e.g., a name discovered
+at runtime), it falls back to the existing IPC path, so behavior is
+identical — only faster.
+-}
+
 -- | The server-side Template Haskell state.  This is created by the
 -- StartTH message.  A new one is created per module that GHC
 -- typechecks.
@@ -512,6 +558,8 @@ data QState = QState
        -- ^ location for current splice, if any
   , qsPipe :: Pipe
        -- ^ pipe to communicate with GHC
+  , qsPrefetch :: PrefetchedQuasiData
+       -- ^ pre-fetched reification data to avoid IPC round-trips
   }
 instance Show QState where show _ = "<QState>"
 
@@ -595,7 +643,7 @@ getMessage = do
       31 -> Msg <$> return StartTH
       32 -> Msg <$> (RunModFinalizers <$> get <*> get)
       33 -> Msg <$> (AddSptEntry <$> get <*> get)
-      34 -> Msg <$> (RunTH <$> get <*> get <*> get <*> get)
+      34 -> Msg <$> (RunTH <$> get <*> get <*> get <*> get <*> get)
       35 -> Msg <$> (GetClosure <$> get)
       36 -> Msg <$> (Seq <$> get)
       37 -> Msg <$> return RtsRevertCAFs
@@ -641,7 +689,7 @@ putMessage m = case m of
   StartTH                     -> putWord8 31
   RunModFinalizers a b        -> putWord8 32 >> put a >> put b
   AddSptEntry a b             -> putWord8 33 >> put a >> put b
-  RunTH st q loc ty           -> putWord8 34 >> put st >> put q >> put loc >> put ty
+  RunTH st q loc ty pqd       -> putWord8 34 >> put st >> put q >> put loc >> put ty >> put pqd
   GetClosure a                -> putWord8 35 >> put a
   Seq a                       -> putWord8 36 >> put a
   RtsRevertCAFs               -> putWord8 37

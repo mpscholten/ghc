@@ -50,7 +50,7 @@ serv verbose hook pipe restore = loop
     when verbose $ trace ("msg: " ++ (show msg))
     case msg of
       Shutdown -> return ()
-      RunTH st q ty loc -> wrapRunTH $ runTH pipe st q ty loc
+      RunTH st q ty loc pqd -> wrapRunTH $ runTH pipe st q ty loc pqd
       RunModFinalizers st qrefs -> wrapRunTH $ runModFinalizerRefs pipe st qrefs
       _other -> run msg >>= reply
 

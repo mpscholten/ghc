@@ -1796,11 +1796,15 @@ runTH ty fhv = do
       -- libraries/ghci/GHCi/TH.hs.
       rstate <- getTHState inst
       loc <- TH.qLocation
+      -- Pre-computed reification data to avoid IPC round-trips.
+      -- See Note [Prefetched Quasi Data] in GHCi.Message.
+      -- TODO: populate with reification info for the splice's free variables
+      let prefetch = emptyPrefetchedQuasiData
       -- run a remote TH request
       r <- liftIO $
         withForeignRef rstate $ \state_hv ->
         withForeignRef fhv $ \q_hv ->
-          sendMessageDelayedResponse inst (RunTH state_hv q_hv ty (Just loc))
+          sendMessageDelayedResponse inst (RunTH state_hv q_hv ty (Just loc) prefetch)
       -- respond to requests from the interpreter
       runRemoteTH inst []
       -- get the final result

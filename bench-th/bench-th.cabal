@@ -1,0 +1,17 @@
+cabal-version: 3.0
+name:          bench-th
+version:       0.1.0.0
+build-type:    Simple
+
+executable bench-th
+  default-language: Haskell2010
+  main-is:          Main.hs
+  other-modules:    AesonTypes
+                  , AesonBench
+  build-depends:
+    base >= 4.16,
+    aeson >= 2.0,
+    template-haskell,
+    text,
+    bytestring
+  ghc-options: -ddump-timings

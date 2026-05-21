@@ -61,6 +61,7 @@ import GHC.Driver.DynFlags (ReexportedModule(..))
 import GHC.Driver.Monad
 import GHC.Driver.Env
 import GHC.Driver.Errors
+import GHC.Core.Map.Expr ( emptyCoreMap )
 import GHC.Driver.Errors.Types
 import GHC.Driver.Main
 import GHC.Driver.MakeSem
@@ -707,6 +708,10 @@ load' mhmi_cache how_much diag_wrapper mHscMessage mod_graph = do
 
     -- Unload everything
     liftIO $ unload interp hsc_env
+
+    -- Clear the BCO cache to avoid stale ForeignHValues after reload.
+    -- See Note [BCO Cache for TH splices] in GHC.Driver.Main.
+    liftIO $ writeIORef (hsc_bco_cache hsc_env) emptyCoreMap
 
     liftIO $ debugTraceMsg logger 2 (hang (text "Ready for upsweep")
                                     2 (ppr build_plan))

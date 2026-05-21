@@ -4,6 +4,7 @@ module GHC.Driver.Env.Types
   ( Hsc(..)
   , HscEnv(..)
   , HasHscEnv(..)
+  , BCOCache
   ) where
 
 import GHC.Driver.Errors.Types ( GhcMessage )
@@ -23,6 +24,10 @@ import GHC.Unit.Env
 import GHC.Utils.Logger
 import GHC.Utils.TmpFs
 import {-# SOURCE #-} GHC.Driver.Plugins
+
+import GHCi.RemoteTypes ( ForeignHValue )
+import GHC.Linker.Types ( Linkable, PkgsLoaded )
+import GHC.Core.Map.Expr ( CoreMap )
 
 import Control.Monad.IO.Class
 import Control.Monad.Trans.Reader
@@ -114,7 +119,19 @@ data HscEnv
 
         , hsc_llvm_config :: !LlvmConfigCache
                 -- ^ LLVM configuration cache.
+
+        , hsc_bco_cache :: !(IORef BCOCache)
+                -- ^ Cache for compiled Core expressions (bytecode).
+                -- Keyed by a fingerprint of the Core expression.
+                -- Used to avoid redundant desugar/simplify/codegen for
+                -- repeated TH splice patterns.
+                -- See Note [BCO Cache for TH splices] in GHC.Driver.Main.
  }
+
+-- | Cache mapping Core expressions to their compiled results.
+-- Uses alpha-equivalence via CoreMap so that expressions with
+-- different uniques but the same structure will match.
+type BCOCache = CoreMap (ForeignHValue, [Linkable], PkgsLoaded)
 
 class HasHscEnv m where
     getHscEnv :: m HscEnv

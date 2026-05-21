@@ -116,7 +116,7 @@ import Unsafe.Coerce
 
 -- | Create a new instance of 'QState'
 initQState :: Pipe -> QState
-initQState p = QState M.empty Nothing p
+initQState p = QState M.empty Nothing p emptyPrefetchedQuasiData
 
 -- | The monad in which we run TH computations on the server
 newtype GHCiQ a = GHCiQ { runGHCiQ :: QState -> IO (a, QState) }
@@ -176,9 +176,26 @@ instance TH.Quasi GHCiQ where
       Left GHCiQException{} -> h s
       Right r -> return r
   qLookupName isType occ = ghcCmd (LookupName isType occ)
-  qReify name = ghcCmd (Reify name)
-  qReifyFixity name = ghcCmd (ReifyFixity name)
-  qReifyType name = ghcCmd (ReifyType name)
+
+  -- Check prefetch cache before IPC round-trip.
+  -- See Note [Prefetched Quasi Data] in GHCi.Message.
+  qReify name = do
+    st <- getState
+    case M.lookup name (pqdReify (qsPrefetch st)) of
+      Just info -> pure info
+      Nothing   -> ghcCmd (Reify name)
+
+  qReifyFixity name = do
+    st <- getState
+    case M.lookup name (pqdReifyFixity (qsPrefetch st)) of
+      Just fixity -> pure fixity
+      Nothing     -> ghcCmd (ReifyFixity name)
+
+  qReifyType name = do
+    st <- getState
+    case M.lookup name (pqdReifyType (qsPrefetch st)) of
+      Just ty -> pure ty
+      Nothing -> ghcCmd (ReifyType name)
   qReifyInstances name tys = ghcCmd (ReifyInstances name tys)
   qReifyRoles name = ghcCmd (ReifyRoles name)
 
@@ -245,16 +262,19 @@ runTH
       -- ^ What kind of splice it is
   -> Maybe TH.Loc
       -- ^ The source location
+  -> PrefetchedQuasiData
+      -- ^ Pre-computed reification data to avoid IPC round-trips.
+      -- See Note [Prefetched Quasi Data] in GHCi.Message.
   -> IO ByteString
       -- ^ Returns an (encoded) result that depends on the THResultType
 
-runTH pipe rstate rhv ty mb_loc = do
+runTH pipe rstate rhv ty mb_loc pqd = do
   hv <- localRef rhv
   case ty of
-    THExp -> runTHQ pipe rstate mb_loc (unsafeCoerce hv :: TH.Q TH.Exp)
-    THPat -> runTHQ pipe rstate mb_loc (unsafeCoerce hv :: TH.Q TH.Pat)
-    THType -> runTHQ pipe rstate mb_loc (unsafeCoerce hv :: TH.Q TH.Type)
-    THDec -> runTHQ pipe rstate mb_loc (unsafeCoerce hv :: TH.Q [TH.Dec])
+    THExp -> runTHQ pipe rstate mb_loc pqd (unsafeCoerce hv :: TH.Q TH.Exp)
+    THPat -> runTHQ pipe rstate mb_loc pqd (unsafeCoerce hv :: TH.Q TH.Pat)
+    THType -> runTHQ pipe rstate mb_loc pqd (unsafeCoerce hv :: TH.Q TH.Type)
+    THDec -> runTHQ pipe rstate mb_loc pqd (unsafeCoerce hv :: TH.Q [TH.Dec])
     THAnnWrapper -> do
       hv <- unsafeCoerce <$> localRef rhv
       case hv :: AnnotationWrapper of
@@ -263,12 +283,13 @@ runTH pipe rstate rhv ty mb_loc = do
 
 -- | Run a Q computation.
 runTHQ
-  :: Binary a => Pipe -> RemoteRef (IORef QState) -> Maybe TH.Loc -> TH.Q a
+  :: Binary a => Pipe -> RemoteRef (IORef QState) -> Maybe TH.Loc
+  -> PrefetchedQuasiData -> TH.Q a
   -> IO ByteString
-runTHQ pipe rstate mb_loc ghciq = do
+runTHQ pipe rstate mb_loc pqd ghciq = do
   qstateref <- localRef rstate
   qstate <- readIORef qstateref
-  let st = qstate { qsLocation = mb_loc, qsPipe = pipe }
+  let st = qstate { qsLocation = mb_loc, qsPipe = pipe, qsPrefetch = pqd }
   (r,new_state) <- runGHCiQ (TH.runQ ghciq) st
   writeIORef qstateref new_state
   return $! LB.toStrict (runPut (put r))

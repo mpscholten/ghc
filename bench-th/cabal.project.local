@@ -1,0 +1,6 @@
+packages: .
+
+allow-newer: all
+
+package *
+  ghc-options: -optl-L/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/lib
