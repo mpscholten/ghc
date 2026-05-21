@@ -41,8 +41,9 @@ import GHC.Driver.Backend
 import GHC.Driver.Phases (StopPhase(..))
 import GHC.Driver.Hooks (runPhaseHook)
 import GHC.Driver.Env.Types (HscEnv(..))
+import System.Semaphore (AbstractSem(..))
 
-import GHC.SysTools.Tasks (withAsPiped)
+import GHC.SysTools.Tasks (withAsPiped, withAsDeferredPiped)
 import GHC.Driver.Session (picCCOpts)
 import GHC.Utils.Misc (withAtomicRename)
 
@@ -58,6 +59,7 @@ import GHC.Utils.Error
 import GHC.Utils.Outputable
 import GHC.Utils.Logger
 import GHC.Utils.Exception ( bracket )
+import qualified Control.Monad.Catch as MC
 import GHC.Utils.Ppr (Mode(..))
 import GHC.Utils.Panic.Plain ( pgmError )
 
@@ -73,6 +75,9 @@ import System.IO
 import Data.Maybe (isJust)
 import Data.Set (Set)
 import qualified Data.Set as Set
+import Control.Concurrent (forkIO, newEmptyMVar, tryPutMVar, yield)
+import Control.Monad (unless)
+import Data.IORef (newIORef, atomicModifyIORef')
 
 {-
 ************************************************************************
@@ -102,12 +107,14 @@ codeOutput
     -> Maybe FilePath -- ^ Just objPath = pipe asm to this .o file;
                       --   Nothing = write .s file normally.
                       --   See Note [Piped assembly output]
+    -> AbstractSem   -- ^ Compile semaphore for pipe-asm.
+                      --   See Note [Piped assembly output]
     -> IO (FilePath,
            (Bool{-stub_h_exists-}, Maybe FilePath{-stub_c_exists-}),
            [(ForeignSrcLang, FilePath)]{-foreign_fps-},
            a)
 codeOutput logger tmpfs llvm_config dflags unit_state this_mod filenm location genForeignStubs foreign_fps pkg_deps dus0
-  cmm_stream mb_pipe_obj_path
+  cmm_stream mb_pipe_obj_path compile_sem
   =
     do  {
         -- Lint each CmmGroup as it goes past
@@ -139,7 +146,7 @@ codeOutput logger tmpfs llvm_config dflags unit_state this_mod filenm location g
                  NcgCodeOutput
                    | Just objPath <- mb_pipe_obj_path
                    -> outputAsmPiped logger dflags this_mod location
-                                     objPath dus1 final_stream
+                                     objPath dus1 compile_sem final_stream
                    | otherwise
                    -> outputAsm logger dflags this_mod location filenm dus1
                                 final_stream
@@ -287,6 +294,27 @@ Piping is disabled when:
 See: canPipeAsm, outputAsmPiped, AsmOutput
 -}
 
+-- | Non-blocking attempt to acquire a semaphore slot.
+-- Forks a thread to call acquireSem; yields to let it run,
+-- then checks if it succeeded. If the slot was available,
+-- returns True (slot is now held by caller). If not, a background
+-- thread will release the slot when it eventually becomes available.
+tryAcquireSem :: AbstractSem -> IO Bool
+tryAcquireSem sem = do
+  result <- newEmptyMVar
+  _ <- forkIO $ do
+    acquireSem sem
+    acquired <- tryPutMVar result ()
+    -- If tryPutMVar fails, the main thread already gave up (put () first).
+    -- Release the slot we just acquired since nobody will use it.
+    unless acquired $ releaseSem sem
+  -- Give the forked thread a chance to acquire an uncontended semaphore.
+  yield
+  gave_up <- tryPutMVar result ()
+  -- If we put () first: the forked thread hasn't acquired yet, return False.
+  -- If the forked thread put () first: it acquired the slot, return True.
+  return (not gave_up)
+
 -- | Output assembly piped directly to the assembler process, overlapping
 -- assembler startup with code generation. The .o file is produced directly.
 outputAsmPiped :: Logger
@@ -295,9 +323,10 @@ outputAsmPiped :: Logger
                -> ModLocation
                -> FilePath    -- ^ .o output path
                -> DUniqSupply
+               -> AbstractSem -- ^ compile semaphore
                -> CgStream RawCmmGroup a
                -> IO a
-outputAsmPiped logger dflags this_mod location objPath dus cmm_stream = do
+outputAsmPiped logger dflags this_mod location objPath dus compile_sem cmm_stream = do
   debugTraceMsg logger 4 (text "Piping asm to assembler, output:" <+> text objPath)
   let ncg_config = initNCGConfig dflags this_mod
       as_args = asmPlatformOpts dflags
@@ -306,13 +335,41 @@ outputAsmPiped logger dflags this_mod location objPath dus cmm_stream = do
            , Option "-"
            , Option "-o"
            ]
+  -- Try to acquire an extra semaphore slot to account for the assembler
+  -- process startup CPU (~30ms). If a slot is available, start the
+  -- assembler early (overlapping its startup with codegen) and release
+  -- the slot once the assembler is waiting on pipe input. If no slot is
+  -- available (all -jN slots busy), defer starting the assembler until
+  -- the NCG first writes output -- this avoids exceeding the -jN CPU
+  -- budget. See Note [Piped assembly output]
+  acquired <- tryAcquireSem compile_sem
   withAtomicRename objPath $ \tempObjPath -> do
     let full_args = as_args ++ [FileOption "" tempObjPath]
-    withAsPiped logger dflags full_args $ \stdinH -> do
-      {-# SCC "NativeCodeGen" #-}
-        fmap fst $
-        runUDSMT dus $ setTagUDSMT CodeGenTag $
-        nativeCodeGen logger (toolSettings dflags) ncg_config location stdinH cmm_stream
+    if acquired
+      then do
+        -- Got an extra slot: start assembler immediately, release
+        -- the slot once the assembler has started (and is idle
+        -- waiting on pipe input).
+        released <- newIORef False
+        let releaseOnce = do
+              done <- atomicModifyIORef' released (\b -> (True, b))
+              unless done $ releaseSem compile_sem
+        (withAsPiped logger dflags full_args $ \stdinH -> do
+          releaseOnce
+          {-# SCC "NativeCodeGen" #-}
+            fmap fst $
+            runUDSMT dus $ setTagUDSMT CodeGenTag $
+            nativeCodeGen logger (toolSettings dflags) ncg_config location stdinH cmm_stream
+         ) `MC.onException` releaseOnce
+      else do
+        -- No slot available: defer assembler start until NCG writes.
+        -- The NCG writes to a pipe; a monitoring thread starts the
+        -- assembler only when data first appears.
+        withAsDeferredPiped logger dflags full_args $ \stdinH -> do
+          {-# SCC "NativeCodeGen" #-}
+            fmap fst $
+            runUDSMT dus $ setTagUDSMT CodeGenTag $
+            nativeCodeGen logger (toolSettings dflags) ncg_config location stdinH cmm_stream
 
 {-
 ************************************************************************

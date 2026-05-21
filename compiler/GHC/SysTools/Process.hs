@@ -14,6 +14,7 @@ module GHC.SysTools.Process
   , runSomethingFiltered
   , runSomethingWith
   , withBuilderPiped
+  , withBuilderDeferredPiped
   ) where
 
 import GHC.Prelude
@@ -46,6 +47,9 @@ import Data.Char
 import System.Exit
 import System.Environment
 import System.FilePath
+#if !defined(mingw32_HOST_OS)
+import qualified System.Posix.IO as PosixIO
+#endif
 import System.IO
 import System.IO.Error as IO
 import System.Process
@@ -434,3 +438,126 @@ withBuilderPiped logger filter_fn phase_name pgm args mb_cwd mb_env action = do
           logInfo logger $ withPprStyle defaultUserStyle m
         BuildError loc m -> do
           reportError logger neverQualify emptyDiagOpts (mkSrcSpan loc loc) m
+
+-- | Like 'withBuilderPiped', but defers starting the external process until
+-- the callback first writes to the provided handle. The callback writes to
+-- one end of a POSIX pipe; a monitor thread uses @threadWaitRead@ to detect
+-- when data is available on the read-end (without consuming it), then starts
+-- the external process with @UseHandle@ so data flows directly from the pipe
+-- to the process's stdin -- no intermediate pump thread is needed.
+--
+-- This avoids using an extra CPU core for process startup when no semaphore
+-- slot is available in @-jN@ builds.
+-- See Note [Piped assembly output] in GHC.Driver.CodeOutput.
+withBuilderDeferredPiped
+  :: Logger
+  -> ([String] -> [String])  -- ^ Filter function for stderr lines
+  -> String              -- ^ phase name for error messages
+  -> String              -- ^ program path
+  -> [Option]            -- ^ arguments
+  -> Maybe FilePath      -- ^ working directory
+  -> Maybe [(String, String)] -- ^ environment
+  -> (Handle -> IO a)    -- ^ action that writes to the pipe
+  -> IO a
+#if !defined(mingw32_HOST_OS)
+withBuilderDeferredPiped logger filter_fn phase_name pgm args mb_cwd mb_env action = do
+  let real_args = filter notNull (map showOpt args)
+      cmdLine = showCommandForUser pgm real_args
+  traceCmd logger phase_name cmdLine $ handleProc pgm phase_name $ do
+    -- Create a POSIX pipe: the callback writes to pipeWriteEnd.
+    -- A monitor thread uses threadWaitRead on the raw read fd to detect
+    -- when data arrives, then starts the process with UseHandle so data
+    -- flows directly through the OS pipe (no Haskell-level pump needed).
+    (readFd, writeFd) <- PosixIO.createPipe
+    pipeWriteEnd <- PosixIO.fdToHandle writeFd
+
+    -- MVar for the monitor thread to report the process exit code.
+    asmResultMVar <- newEmptyMVar
+
+    -- Fork monitor thread: waits for data on the pipe read fd, then
+    -- starts the process with UseHandle to connect pipe directly to stdin.
+    _ <- forkIO $ do
+      result <- try $ do
+        -- Block until the callback writes data (or closes the pipe).
+        -- threadWaitRead does NOT consume any data from the pipe --
+        -- it only uses the I/O event manager (kqueue/epoll) to check
+        -- for fd readiness.
+        threadWaitRead readFd
+
+        -- Convert the raw fd to a Handle for UseHandle.
+        -- The data is still in the OS pipe buffer, untouched.
+        pipeReadHandle <- PosixIO.fdToHandle readFd
+
+        -- fdToHandle sets the fd to non-blocking mode (for GHC's I/O
+        -- manager), but the child process (assembler) expects blocking
+        -- stdin. Set it back to blocking. We never do I/O through this
+        -- Handle ourselves, so this is safe.
+        PosixIO.setFdOption readFd PosixIO.NonBlockingRead False
+
+        -- Start the external process with pipe read-end as stdin.
+        -- Data flows directly through the OS pipe from NCG to the
+        -- assembler -- no Haskell-level pump thread needed.
+        withPipe $ \(errReadEnd, errWriteEnd) -> do
+#if defined(__IO_MANAGER_WINIO__)
+          return () <!> do
+            associateHandle' =<< handleToHANDLE errReadEnd
+#endif
+          mask $ \restore -> do
+            let procdata =
+                  enableProcessJobs
+                  $ (proc pgm real_args) {
+                    cwd = mb_cwd
+                  , env = mb_env
+                  , std_in  = UseHandle pipeReadHandle
+                  , std_out = UseHandle errWriteEnd
+                  , std_err = UseHandle errWriteEnd
+                  }
+            (Nothing, Nothing, Nothing, hProcess) <- restore $
+              createProcess_ "withBuilderDeferredPiped" procdata
+            hClose errWriteEnd
+            hClose pipeReadHandle  -- child inherited fd via dup
+
+            -- Error output reading thread
+            errMVar <- newEmptyMVar
+            _ <- forkIO $ do
+              getLocaleEncoding >>= hSetEncoding errReadEnd
+              hSetNewlineMode errReadEnd nativeNewlineMode
+              hSetBuffering errReadEnd LineBuffering
+              messages <- parseBuildMessages . filter_fn . lines <$> hGetContents errReadEnd
+              mapM_ processBuildMessage messages
+              putMVar errMVar ()
+
+            -- Wait for process to finish
+            takeMVar errMVar
+            exitCode <- waitForProcess hProcess
+            return exitCode
+      putMVar asmResultMVar result
+
+    -- Run the callback (NCG writes assembly to pipeWriteEnd)
+    r <- try $ action pipeWriteEnd
+
+    -- Close write-end to signal EOF to the process
+    hClose pipeWriteEnd
+
+    case r of
+      Left (SomeException e) -> do
+        _ <- takeMVar asmResultMVar
+        throw e
+      Right a -> do
+        asmR <- takeMVar asmResultMVar
+        case asmR of
+          Left (SomeException e) -> throw e
+          Right exitCode -> return (exitCode, a)
+  where
+    processBuildMessage :: BuildMessage -> IO ()
+    processBuildMessage msg = do
+      case msg of
+        BuildMsg m -> do
+          logInfo logger $ withPprStyle defaultUserStyle m
+        BuildError loc m -> do
+          reportError logger neverQualify emptyDiagOpts (mkSrcSpan loc loc) m
+#else
+-- On Windows, fall back to the standard piped builder (no deferred start).
+withBuilderDeferredPiped logger filter_fn phase_name pgm args mb_cwd mb_env action =
+  withBuilderPiped logger filter_fn phase_name pgm args mb_cwd mb_env action
+#endif

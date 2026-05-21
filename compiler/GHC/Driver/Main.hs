@@ -113,6 +113,7 @@ import GHC.Driver.Session
 import GHC.Driver.Backend
 import GHC.Driver.Env
 import GHC.Driver.ByteCode
+import System.Semaphore (AbstractSem(..))
 import GHC.Driver.Env.KnotVars
 import GHC.Driver.Errors
 import GHC.Driver.Messager
@@ -341,6 +342,7 @@ newHscEnvWithHUG top_dir top_dynflags cur_unit home_unit_graph = do
                   , hsc_hooks          = emptyHooks
                   , hsc_tmpfs          = tmpfs
                   , hsc_llvm_config    = llvm_config
+                  , hsc_compile_sem    = AbstractSem (pure ()) (pure ())
                   }
 
 -- | Initialize HscEnv from an optional top_dir path
@@ -2138,7 +2140,7 @@ hscGenHardCode hsc_env cgguts mod_loc output_filename mb_pipe_obj_path = do
                   <- {-# SCC "codeOutput" #-}
                     codeOutput logger tmpfs llvm_config dflags (hsc_units hsc_env) this_mod output_filename mod_loc
                     foreign_stubs foreign_files dependencies (initDUniqSupply 'n' 0) rawcmms1
-                    mb_pipe_obj_path
+                    mb_pipe_obj_path (hsc_compile_sem hsc_env)
               return  ( output_filename, stub_c_exists, foreign_fps
                       , Just stg_cg_infos, Just cmm_cg_infos)
 
@@ -2321,7 +2323,7 @@ hscCompileCmmFile hsc_env original_filename filename output_filename = runHsc hs
               | otherwise     = NoStubs
         (_output_filename, (_stub_h_exists, stub_c_exists), _foreign_fps, _caf_infos)
           <- codeOutput logger tmpfs llvm_config dflags (hsc_units hsc_env) cmm_mod output_filename no_loc foreign_stubs [] S.empty
-             dus1 rawCmms Nothing
+             dus1 rawCmms Nothing (hsc_compile_sem hsc_env)
         return stub_c_exists
   where
     no_loc = OsPathModLocation

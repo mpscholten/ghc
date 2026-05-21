@@ -29,6 +29,7 @@ import Control.Monad.Trans.Reader
 import Control.Monad.Trans.State
 import Data.IORef
 import GHC.Driver.Env.KnotVars
+import System.Semaphore (AbstractSem(..))
 
 -- | The Hsc monad: Passing an environment and diagnostic state
 newtype Hsc a = Hsc (HscEnv -> Messages GhcMessage -> IO (a, Messages GhcMessage))
@@ -114,6 +115,12 @@ data HscEnv
 
         , hsc_llvm_config :: !LlvmConfigCache
                 -- ^ LLVM configuration cache.
+
+        , hsc_compile_sem :: !AbstractSem
+                -- ^ Compile semaphore from --make/-jN/--jsem.
+                -- Used by pipe-asm to acquire an extra slot during
+                -- assembler process startup.
+                -- See Note [Piped assembly output] in GHC.Driver.CodeOutput
  }
 
 class HasHscEnv m where

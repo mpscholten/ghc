@@ -1578,7 +1578,8 @@ executeCompileNode k n !old_hmi hug mrehydrate_mods mni = do
   me@MakeEnv{..} <- ask
   -- Rehydrate any dependencies if this module had a boot file or is a signature file.
   lift $ MaybeT (withAbstractSem compile_sem $ withLoggerHsc k me $ \hsc_env -> do
-     hsc_env' <- liftIO $ maybeRehydrateBefore (setHUG hug hsc_env) mni fixed_mrehydrate_mods
+     let hsc_env_sem = hsc_env { hsc_compile_sem = compile_sem }
+     hsc_env' <- liftIO $ maybeRehydrateBefore (setHUG hug hsc_env_sem) mni fixed_mrehydrate_mods
      case mni of
        ModuleNodeCompile mod -> executeCompileNodeWithSource hsc_env' me  mod
        ModuleNodeFixed key loc -> executeCompileNodeFixed hsc_env' me key loc

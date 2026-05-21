@@ -18,6 +18,7 @@ module GHC.SysTools.Tasks
   , LdConfig(..)
   , runAs
   , withAsPiped
+  , withAsDeferredPiped
   , runLlvmOpt
   , runLlvmLlc
   , runLlvmAs
@@ -317,6 +318,16 @@ withAsPiped logger dflags args action = traceSystoolCommand logger "as" $ do
       args2 = args0 ++ args1 ++ args
   mb_env <- getGccEnv args2
   withBuilderPiped logger id "Assembler" p args2 Nothing mb_env action
+
+-- | Like 'withAsPiped', but defers starting the assembler until the
+-- callback first writes to the handle. See 'withBuilderDeferredPiped'.
+withAsDeferredPiped :: Logger -> DynFlags -> [Option] -> (Handle -> IO a) -> IO a
+withAsDeferredPiped logger dflags args action = traceSystoolCommand logger "as" $ do
+  let (p,args0) = pgm_a dflags
+      args1 = map Option (getOpts dflags opt_a)
+      args2 = args0 ++ args1 ++ args
+  mb_env <- getGccEnv args2
+  withBuilderDeferredPiped logger id "Assembler" p args2 Nothing mb_env action
 
 -- | Run the LLVM Optimiser
 runLlvmOpt :: Logger -> DynFlags -> [Option] -> IO ()
