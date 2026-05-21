@@ -128,6 +128,7 @@ import GHC.Driver.Config.Logger   (initLogFlags)
 import GHC.Driver.Config.Parser   (initParserOpts)
 import GHC.Driver.Config.Stg.Ppr  (initStgPprOpts)
 import GHC.Driver.Config.Stg.Pipeline (initStgPipelineOpts)
+import GHC.Driver.Pipeline.WholeProgramDCE (filterCoreBindingsForDCE, storeCgGutsForDCE)
 import GHC.Driver.Config.StgToCmm  (initStgToCmmConfig)
 import GHC.Driver.Config.Cmm       (initCmmConfig)
 import GHC.Driver.LlvmConfigCache  (initLlvmConfigCache)
@@ -1966,13 +1967,26 @@ hscGenHardCode hsc_env cgguts mod_loc output_filename = do
             logger = hsc_logger hsc_env
 
         -------------------
+        -- WHOLE-PROGRAM DCE (if enabled)
+        -- First, store CgGuts for non-Main modules so we can recompile at link time
+        -- with dead code eliminated
+        storeCgGutsForDCE dflags cgguts mod_loc
+
+        -- Filter out dead bindings BEFORE codegen - they never get compiled!
+        (filtered_binds, eliminated) <- filterCoreBindingsForDCE dflags this_mod core_binds
+        when (eliminated > 0) $
+          debugTraceMsg logger 2 $
+            text "DCE: Eliminated" <+> int eliminated <+>
+            text "dead bindings from" <+> ppr this_mod
+
+        -------------------
         -- ADD IMPLICIT BINDINGS
         -- NB: we must feed mkImplicitBinds through corePrep too
         -- so that they are suitably cloned and eta-expanded
         let cp_pgm_cfg :: CorePrepPgmConfig
             cp_pgm_cfg = initCorePrepPgmConfig (hsc_dflags hsc_env)
                                                (interactiveInScope $ hsc_IC hsc_env)
-        binds_with_implicits <- addImplicitBinds cp_pgm_cfg mod_loc (cg_tycons cgguts) core_binds
+        binds_with_implicits <- addImplicitBinds cp_pgm_cfg mod_loc (cg_tycons cgguts) filtered_binds
 
         -------------------
         -- INSERT LATE COST CENTRES, based on the provided flags.

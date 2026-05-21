@@ -767,7 +767,7 @@ rootSummariesParallel ::
   IO ([DriverMessages], [ModSummary])
 rootSummariesParallel n_jobs hsc_env diag_wrapper msg get_summary = do
   (actions, get_results) <- unzip <$> mapM action_and_result (zip [1..] bundles)
-  runPipelines n_jobs hsc_env diag_wrapper msg actions
+  runPipelines n_jobs hsc_env diag_wrapper msg NoDCE actions
   (sequence . catMaybes <$> sequence get_results) >>= \case
     Right results -> pure (partitionEithers (concat results))
     Left exc -> throwIO exc

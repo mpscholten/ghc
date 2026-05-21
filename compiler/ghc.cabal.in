@@ -395,6 +395,8 @@ Library
         GHC.Core.Opt.Stats
         GHC.Core.Opt.WorkWrap
         GHC.Core.Opt.WorkWrap.Utils
+        GHC.Core.Opt.WholeProgramDCE
+        GHC.Core.Opt.WholeProgramDCE.Types
         GHC.Core.PatSyn
         GHC.Core.Ppr
         GHC.Types.TyThing.Ppr
@@ -535,6 +537,7 @@ Library
         GHC.Driver.Pipeline.LogQueue
         GHC.Driver.Pipeline.Phases
         GHC.Driver.Pipeline.Monad
+        GHC.Driver.Pipeline.WholeProgramDCE
         GHC.Driver.Plugins
         GHC.Driver.Plugins.External
         GHC.Driver.Ppr

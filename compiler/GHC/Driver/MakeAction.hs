@@ -17,6 +17,8 @@ module GHC.Driver.MakeAction
   , withParLog
   , withLocalTmpFS
   , withLocalTmpFSMake
+  -- * DCE
+  , MaybeDCEContext(..)
   ) where
 
 import GHC.Prelude
@@ -27,6 +29,7 @@ import GHC.Driver.Env
 import GHC.Driver.Errors.Types
 import GHC.Driver.Messager
 import GHC.Driver.MakeSem
+import GHC.Driver.Pipeline.WholeProgramDCE (DCEContext)
 
 import GHC.Utils.Logger
 import GHC.Utils.TmpFs
@@ -69,6 +72,11 @@ data WorkerLimit
       -- ^ Semaphore name to use
   deriving Eq
 
+-- | Optional DCE context for whole-program dead code elimination
+data MaybeDCEContext
+    = NoDCE                      -- ^ DCE is disabled
+    | WithDCE !DCEContext        -- ^ DCE is enabled with this context
+
 -- | Environment used when compiling a module
 data MakeEnv = MakeEnv { hsc_env :: !HscEnv -- The basic HscEnv which will be augmented for each module
                        , compile_sem :: !AbstractSem
@@ -79,6 +87,7 @@ data MakeEnv = MakeEnv { hsc_env :: !HscEnv -- The basic HscEnv which will be au
                        , withLogger :: forall a . Int -> ((Logger -> Logger) -> IO a) -> IO a
                        , env_messager :: !(Maybe Messager)
                        , diag_wrapper :: GhcMessage -> AnyGhcDiagnostic
+                       , env_dce :: !MaybeDCEContext  -- ^ DCE context for whole-program dead code elimination
                        }
 
 
@@ -88,21 +97,22 @@ label_self thread_name = do
     CC.labelThread self_tid thread_name
 
 
-runPipelines :: WorkerLimit -> HscEnv -> (GhcMessage -> AnyGhcDiagnostic) -> Maybe Messager -> [MakeAction] -> IO ()
+runPipelines :: WorkerLimit -> HscEnv -> (GhcMessage -> AnyGhcDiagnostic) -> Maybe Messager -> MaybeDCEContext -> [MakeAction] -> IO ()
 -- Don't even initialise plugins if there are no pipelines
-runPipelines n_job hsc_env diag_wrapper mHscMessager all_pipelines = do
+runPipelines n_job hsc_env diag_wrapper mHscMessager dce_ctx all_pipelines = do
   liftIO $ label_self "main --make thread"
   case n_job of
-    NumProcessorsLimit n | n <= 1 -> runSeqPipelines hsc_env diag_wrapper mHscMessager all_pipelines
-    _n -> runParPipelines n_job hsc_env diag_wrapper mHscMessager all_pipelines
+    NumProcessorsLimit n | n <= 1 -> runSeqPipelines hsc_env diag_wrapper mHscMessager dce_ctx all_pipelines
+    _n -> runParPipelines n_job hsc_env diag_wrapper mHscMessager dce_ctx all_pipelines
 
-runSeqPipelines :: HscEnv -> (GhcMessage -> AnyGhcDiagnostic) -> Maybe Messager -> [MakeAction] -> IO ()
-runSeqPipelines plugin_hsc_env diag_wrapper mHscMessager all_pipelines =
+runSeqPipelines :: HscEnv -> (GhcMessage -> AnyGhcDiagnostic) -> Maybe Messager -> MaybeDCEContext -> [MakeAction] -> IO ()
+runSeqPipelines plugin_hsc_env diag_wrapper mHscMessager dce_ctx all_pipelines =
   let env = MakeEnv { hsc_env = plugin_hsc_env
                     , withLogger = \_ k -> k id
                     , compile_sem = AbstractSem (return ()) (return ())
                     , env_messager = mHscMessager
                     , diag_wrapper = diag_wrapper
+                    , env_dce = dce_ctx
                     }
   in runAllPipelines (NumProcessorsLimit 1) env all_pipelines
 
@@ -140,9 +150,10 @@ runParPipelines :: WorkerLimit -- ^ How to limit work parallelism
              -> HscEnv         -- ^ The basic HscEnv which is augmented with specific info for each module
              -> (GhcMessage -> AnyGhcDiagnostic)
              -> Maybe Messager   -- ^ Optional custom messager to use to report progress
+             -> MaybeDCEContext  -- ^ DCE context for whole-program dead code elimination
              -> [MakeAction]  -- ^ The build plan for all the module nodes
              -> IO ()
-runParPipelines worker_limit plugin_hsc_env diag_wrapper mHscMessager all_pipelines = do
+runParPipelines worker_limit plugin_hsc_env diag_wrapper mHscMessager dce_ctx all_pipelines = do
 
 
   -- A variable which we write to when an error has happened and we have to tell the
@@ -165,6 +176,7 @@ runParPipelines worker_limit plugin_hsc_env diag_wrapper mHscMessager all_pipeli
                       , compile_sem = abstract_sem
                       , env_messager = mHscMessager
                       , diag_wrapper = diag_wrapper
+                      , env_dce = dce_ctx
                       }
     -- Reset the number of capabilities once the upsweep ends.
     runAllPipelines worker_limit env all_pipelines

@@ -13,8 +13,11 @@ import GHC.CoreToStg.Prep( CorePrepPgmConfig(..) )
 import GHC.Unit( ModLocation(..) )
 
 import GHC.Core
-import GHC.Core.DataCon( DataCon, dataConWorkId, dataConWrapId )
+import GHC.Core.DataCon( DataCon, dataConWorkId, dataConWrapId, dataConName )
 import GHC.Core.TyCon( TyCon, tyConDataCons, isBoxedDataTyCon, tyConClass_maybe )
+
+import GHC.Driver.Pipeline.WholeProgramDCE ( isNameLive )
+import System.IO.Unsafe ( unsafePerformIO )
 import GHC.Core.Class( classAllSelIds )
 
 import GHC.Types.Name
@@ -104,9 +107,14 @@ mkImplicitBinds gen_debug_info mod_loc tycon
   where
     datacon_binds
       | isBoxedDataTyCon tycon
-      = concatMap (dataConBinds gen_debug_info mod_loc) (tyConDataCons tycon)
+      -- Filter out dead DataCons when whole-program DCE is enabled
+      = concatMap (dataConBinds gen_debug_info mod_loc) liveDataCons
       | otherwise
       = []
+      where
+        -- Only include DataCons that are live according to DCE analysis
+        liveDataCons = filter isDataConLive (tyConDataCons tycon)
+        isDataConLive dc = unsafePerformIO (isNameLive (dataConName dc))
       -- The 'otherwise' includes family TyCons of course, but also (less obviously)
       --  * Newtypes: see Note [Compulsory newtype unfolding] in GHC.Types.Id.Make
       --  * type data: we don't want any code for type-only stuff (#24620)

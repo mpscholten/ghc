@@ -46,6 +46,8 @@ import GHC.Core.DataCon
 import GHC.Core.TyCon
 import GHC.Core.Multiplicity
 
+import GHC.Driver.Pipeline.WholeProgramDCE (isNameLive)
+
 
 import GHC.Utils.Error
 import GHC.Utils.Outputable
@@ -56,7 +58,7 @@ import GHC.Utils.TmpFs
 import GHC.Data.Stream
 import GHC.Data.OrdList
 
-import Control.Monad (when,void, forM_)
+import Control.Monad (when, void, forM_)
 import GHC.Utils.Misc
 import System.IO.Unsafe
 import qualified Data.ByteString as BS
@@ -76,7 +78,7 @@ codeGen :: Logger
 
 codeGen logger tmpfs cfg (InfoTableProvMap denv _ _) tycons
         cost_centre_info stg_binds
-  = do  {     -- cg: run the code generator, and yield the resulting CmmGroup
+  = do  { -- cg: run the code generator, and yield the resulting CmmGroup
               -- Using an IORef to store the state is a bit crude, but otherwise
               -- we would need to add a state monad layer which regresses
               -- allocations by 0.5-2%.
@@ -285,20 +287,44 @@ mkModuleInit cost_centre_info
 ---------------------------------------------------------------
 cgTyCon :: TyCon -> FCode ()
 -- Generate static data for each algebraic data type
+-- With whole-program DCE enabled, only generates info tables for live DataCons
 cgTyCon tycon
   | not (isBoxedDataTyCon tycon)  -- Type families, newtypes, and `type data` constructors
   = return ()
 
   | otherwise   -- An honest-to-goodness algebraic data type
-  = do { -- Emit normal info_tables, for data constructors defined in this module.
-         mapM_ (cgDataCon DefinitionSite) (tyConDataCons tycon)
+  = do { -- Filter dead DataCons when DCE is enabled
+         -- Note: We use unsafePerformIO here because FCode doesn't support IO,
+         -- but the liveness check is effectively pure (reading global state that
+         -- won't change during code generation).
+         let allDataCons = tyConDataCons tycon
+             liveDataCons = filter isDataConLive allDataCons
 
-       ; when (isEnumerationTyCon tycon) $
-         cgEnumerationTyCon tycon }
+         -- Emit info_tables only for live data constructors
+       ; mapM_ (cgDataCon DefinitionSite) liveDataCons
+
+         -- For enumeration types, emit the closure table with only live constructors
+       ; when (isEnumerationTyCon tycon && not (null liveDataCons)) $
+         cgEnumerationTyConFiltered tycon liveDataCons
+       }
+  where
+    isDataConLive dc = unsafePerformIO (isNameLive (dataConName dc))
+
+-- | Generate a table of static closures for an enumeration type with only live constructors
+-- Note that the closure pointers in the table are tagged.
+cgEnumerationTyConFiltered :: TyCon -> [DataCon] -> FCode ()
+cgEnumerationTyConFiltered tycon liveDataCons
+  = do platform <- getPlatform
+       emitRODataLits (mkClosureTableLabel (tyConName tycon) NoCafRefs)
+             [ CmmLabelOff (mkClosureLabel (dataConName con) NoCafRefs)
+                           (tagForCon platform con)
+             | con <- liveDataCons ]
 
 cgEnumerationTyCon :: TyCon -> FCode ()
 -- Generate a table of static closures for an enumeration type.
 -- Note that the closure pointers in the table are tagged.
+-- Note: This function is kept for compatibility but cgTyCon now uses
+-- cgEnumerationTyConFiltered to support DCE.
 cgEnumerationTyCon tycon
   = do platform <- getPlatform
        emitRODataLits (mkClosureTableLabel (tyConName tycon) NoCafRefs)

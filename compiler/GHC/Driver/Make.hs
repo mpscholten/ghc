@@ -56,6 +56,8 @@ import qualified GHC.Linker.Loader as Linker
 
 import GHC.Driver.Config.Diagnostic
 import GHC.Driver.Pipeline
+import GHC.Driver.Pipeline.Monad (PipelineOutput(..))
+import GHC.Driver.Phases (StopPhase(..))
 import GHC.Driver.Session
 import GHC.Driver.DynFlags (ReexportedModule(..))
 import GHC.Driver.Monad
@@ -81,7 +83,7 @@ import GHC.Utils.Panic
 import GHC.Utils.Misc
 import GHC.Utils.Error
 import GHC.Utils.Logger
-import GHC.Utils.TmpFs
+import GHC.Utils.TmpFs (newTempName, TempFileLifetime(..), TmpFs, keepCurrentModuleTempFiles, cleanCurrentModuleTempFiles)
 
 import GHC.Types.Basic
 import GHC.Types.Error
@@ -97,6 +99,7 @@ import GHC.Unit.Finder
 import GHC.Unit.Module.ModSummary
 import GHC.Unit.Module.ModIface
 import GHC.Unit.Module.Graph
+import GHC.Unit.Module.Location (ml_obj_file)
 import GHC.Unit.Home.ModInfo
 import GHC.Unit.Module.ModDetails
 
@@ -130,6 +133,12 @@ import qualified GHC.Data.Maybe as M
 import GHC.Data.Graph.Directed.Reachability
 import qualified GHC.Unit.Home.Graph as HUG
 import GHC.Unit.Home.PackageTable
+
+import GHC.Driver.Pipeline.WholeProgramDCE
+    ( initDCEContext, noDCEContext, finalizeDCE, reportDCEStats
+    , setGlobalDCEContext, getModulesWithDeadCode, getFilteredCgGutsForModule
+    , DCEContext
+    )
 
 -- -----------------------------------------------------------------------------
 -- Loading the program
@@ -713,13 +722,89 @@ load' mhmi_cache how_much diag_wrapper mHscMessage mod_graph = do
 
     worker_limit <- liftIO $ mkWorkerLimit dflags
 
+    -- Initialize whole-program DCE if enabled
+    (dce_ctx, maybe_dce_ctx) <- liftIO $ if gopt Opt_WholeProgramDCE dflags
+                        then do
+                          ctx <- initDCEContext dflags
+                          setGlobalDCEContext (Just ctx)  -- Make context available globally for codegen
+                          return (ctx, WithDCE ctx)
+                        else do
+                          ctx <- noDCEContext
+                          setGlobalDCEContext Nothing
+                          return (ctx, NoDCE)
+
     (upsweep_ok, new_deps) <- withDeferredDiagnostics $ do
       hsc_env <- getSession
-      liftIO $ upsweep worker_limit hsc_env mhmi_cache diag_wrapper mHscMessage (toCache pruned_cache) build_plan
+      liftIO $ upsweep worker_limit hsc_env mhmi_cache diag_wrapper mHscMessage maybe_dce_ctx (toCache pruned_cache) build_plan
 
     -- At this point, all the HPT variables will be populated, but we don't want
     -- to leak the contents of a failed session.
     liftIO $ restrictDepsHscEnv new_deps hsc_env
+
+    -- Finalize DCE and report stats if enabled
+    when (gopt Opt_WholeProgramDCE dflags) $ do
+        hsc_env' <- getSession
+        liftIO $ do
+            _ <- finalizeDCE dce_ctx
+            reportDCEStats logger dce_ctx
+
+            -- Get modules that have dead code
+            modulesWithDeadCode <- getModulesWithDeadCode dce_ctx
+
+            -- Recompile modules with dead code using filtered CgGuts
+            forM_ modulesWithDeadCode $ \(mod, deadCount, totalCount) -> do
+                debugTraceMsg logger 1 $
+                    text "DCE: Recompiling" <+> ppr mod <+> text "to eliminate" <+>
+                    int deadCount <+> text "dead bindings out of" <+> int totalCount <+>
+                    parens (int ((deadCount * 100) `div` totalCount) <> text "% dead")
+
+                -- Get filtered CgGuts for this module
+                mFiltered <- getFilteredCgGutsForModule dce_ctx mod
+                case mFiltered of
+                    Nothing -> return ()  -- Shouldn't happen
+                    Just (filteredCgGuts, modLoc) -> do
+                        -- Recompile with filtered Core
+                        let dflags' = hsc_dflags hsc_env'
+                            tmpfs = hsc_tmpfs hsc_env'
+
+                        -- Generate assembly to temp file
+                        temp_s <- newTempName logger tmpfs (tmpDir dflags') TFL_CurrentModule "s"
+                        _ <- hscGenHardCode hsc_env' filteredCgGuts modLoc temp_s
+
+                        -- Assemble using GHC's standard pipeline
+                        -- Passing (Just modLoc) ensures output goes to ml_obj_file modLoc
+                        -- (see getOutputFilename in Execute.hs - it uses ml_obj_file when
+                        --  next_phase is StopLn and location is Just)
+                        let pipe_env = mkPipeEnv NoStop temp_s Nothing Persistent
+                            pipeline = asPipeline False pipe_env hsc_env' (Just modLoc) temp_s
+                        mObjFile <- runPipeline (hsc_hooks hsc_env') pipeline
+                        case mObjFile of
+                            Nothing -> debugTraceMsg logger 1 $
+                                text "DCE: Warning - assembly produced no object file for" <+> ppr mod
+                            Just obj_file -> debugTraceMsg logger 2 $
+                                text "DCE: Regenerated" <+> text obj_file
+
+            -- Re-link the executable with the regenerated object files
+            when (not (null modulesWithDeadCode)) $ do
+                debugTraceMsg logger 1 $
+                    text "DCE: Re-linking executable with dead code eliminated"
+                -- Get the output file from the home unit environment dflags
+                -- (guessOutputFile sets it there, not in hsc_dflags)
+                let unit_env = hsc_unit_env hsc_env'
+                    hue = ue_currentHomeUnitEnv unit_env
+                    hue_dflags = homeUnitEnv_dflags hue
+                    -- Update hsc_env with the correct outputFile_
+                    dflags_with_output = (hsc_dflags hsc_env') { outputFile_ = outputFile_ hue_dflags }
+                    hsc_env_for_link = hsc_env' { hsc_dflags = dflags_with_output }
+                _ <- link (ghcLink dflags_with_output)
+                          hsc_env_for_link
+                          True  -- attempt linking
+                          Nothing  -- no messager
+                          (hsc_HPT hsc_env_for_link)
+                return ()
+
+            setGlobalDCEContext Nothing  -- Clear global context
+
     case upsweep_ok of
       Failed -> loadFinish upsweep_ok
       Succeeded -> do
@@ -1186,12 +1271,13 @@ upsweep
     -> Maybe ModIfaceCache -- ^ A cache to incrementally write final interface files to
     -> (GhcMessage -> AnyGhcDiagnostic)
     -> Maybe Messager
+    -> MaybeDCEContext -- ^ DCE context for whole-program dead code elimination
     -> M.Map ModNodeKeyWithUid HomeModInfo
     -> [BuildPlan]
     -> IO (SuccessFlag, [HomeModInfo])
-upsweep n_jobs hsc_env hmi_cache diag_wrapper mHscMessage old_hpt build_plan = do
+upsweep n_jobs hsc_env hmi_cache diag_wrapper mHscMessage dce_ctx old_hpt build_plan = do
     (cycle, pipelines, collect_result) <- interpretBuildPlan (hsc_HUG hsc_env) hmi_cache old_hpt build_plan
-    runPipelines n_jobs hsc_env diag_wrapper mHscMessage pipelines
+    runPipelines n_jobs hsc_env diag_wrapper mHscMessage dce_ctx pipelines
     res <- collect_result
     let sec = initSourceErrorContext (hsc_dflags hsc_env)
 
@@ -1612,7 +1698,7 @@ executeCompileNode k n !old_hmi hug mrehydrate_mods mni = do
             return (HomeModInfo iface details hm_linkable)
 
     executeCompileNodeWithSource :: HscEnv -> MakeEnv -> ModSummary -> IO (Maybe HomeModInfo)
-    executeCompileNodeWithSource hsc_env MakeEnv{diag_wrapper, env_messager} mod = do
+    executeCompileNodeWithSource hsc_env MakeEnv{diag_wrapper, env_messager, env_dce} mod = do
      let -- Use the cached DynFlags which includes OPTIONS_GHC pragmas
          lcl_dynflags = ms_hspp_opts mod
      let lcl_hsc_env =
@@ -1624,6 +1710,10 @@ executeCompileNode k n !old_hmi hug mrehydrate_mods mni = do
      wrapAction diag_wrapper lcl_hsc_env $ do
       res <- upsweep_mod lcl_hsc_env env_messager old_hmi mod k n
       cleanCurrentModuleTempFilesMaybe (hsc_logger hsc_env) (hsc_tmpfs hsc_env) lcl_dynflags
+      -- TODO: Register module Core with DCE when available
+      -- For now, env_dce is available but Core registration requires
+      -- modifying compileOne' in Pipeline.hs to expose Core programs
+      _ <- return env_dce  -- Silence unused warning
       return res
 
 
