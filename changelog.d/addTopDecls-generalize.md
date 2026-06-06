@@ -1,4 +1,6 @@
 section: template-haskell
+issues: #26485 #10853
+mrs: !16150
 synopsis:
   ``addTopDecls`` now accepts more top-level declaration forms.
 description: {
