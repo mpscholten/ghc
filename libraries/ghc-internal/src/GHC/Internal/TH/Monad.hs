@@ -859,6 +859,10 @@ addTempFile suffix = Q (qAddTempFile suffix)
 -- @data@ declaration with 'addTopDecls' and then construct values of that type
 -- in the expression it returns.
 --
+-- Generated binders that must be used by the splice result should be built
+-- with exact 'Name's, such as those produced by 'newName', rather than ordinary
+-- source names produced by 'mkName'.
+--
 -- These declarations also contribute names to later declaration groups.
 -- However, they do not bring ordinary source names into scope later in the
 -- same declaration group, because that group has already been renamed. This

@@ -473,6 +473,11 @@ test('TH_addTopDecls_record_dot_do',
 test('TH_addTopDecls_newtype_type', normal, compile_and_run, [''])
 test('TH_addTopDecls_class_method', normal, compile_and_run, [''])
 test('TH_addTopDecls_inst_data_family', normal, compile_and_run, [''])
+test('TH_addTopDecls_data_family_inst', normal, compile_and_run, [''])
+test('TH_addTopDecls_non_exact_type_fail',
+     grep_errmsg(r'is not a NameU'),
+     compile_fail,
+     [''])
 test('TH_addTopDecls_same_group_name_fail',
      [extra_files(['TH_addTopDecls_ProjectRows.hs']),
       grep_errmsg(r'Variable not in scope: name')],
